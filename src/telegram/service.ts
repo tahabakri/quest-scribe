@@ -1,0 +1,325 @@
+import { hasEnded } from '../campaign.js';
+import { type BindStore, normalizeBindId } from '../binds.js';
+import type { AppConfig } from '../config.js';
+import { type Logger } from '../logger.js';
+import type { QuestMatcher } from '../matcher.js';
+import { buildHelpText, questNameFor } from '../quests.js';
+import type { BindRow, SubmissionRow } from '../sheets/schema.js';
+import { buildSubmissionRow, classifyImageMessage } from '../submissions.js';
+import type { SheetWriter } from '../writer.js';
+import { AlbumCollector } from './albums.js';
+import { firstLinkIn } from './parse.js';
+import type { TelegramApiPort, TgMessage } from './types.js';
+
+/** What the sheet's channel_name column says for every Telegram submission: it all happens in direct messages. */
+export const TELEGRAM_CHANNEL_NAME = 'telegram_dm';
+
+const CAPTION_LIMIT = 1024;
+
+export interface TelegramServiceDeps {
+  config: Pick<AppConfig, 'quests' | 'bind' | 'replies' | 'telegram'>;
+  matcher: QuestMatcher;
+  binds: BindStore;
+  writer: Pick<SheetWriter, 'record' | 'has'>;
+  api: TelegramApiPort;
+  /** The private channel's ID as Telegram gives it: -100 followed by digits. */
+  reviewChannelId: string;
+  /** After this moment submissions are answered, not logged. */
+  campaignEnd?: Date | undefined;
+  log: Logger;
+  /** How long to wait for the rest of an album. */
+  albumWaitMs?: number;
+}
+
+/**
+ * Everything the bot does on Telegram, one message at a time. Talks to Telegram
+ * only through `api`, so it can be tested without the network, and never throws:
+ * a bad message is logged and answered, it cannot stop the bot.
+ *
+ * Everything happens in direct messages. A group is ignored, except that /bind
+ * there is answered once with "message me privately".
+ */
+export class TelegramService {
+  private readonly albums: AlbumCollector;
+  private readonly helpText: string;
+
+  constructor(private readonly deps: TelegramServiceDeps) {
+    const { config } = deps;
+    this.helpText = buildHelpText(config.telegram.welcome, config.telegram.helpQuestsHeading, config.quests);
+    this.albums = new AlbumCollector(
+      (parts) => this.safely(parts[0]?.chatId, () => this.submitImages(parts)),
+      deps.albumWaitMs,
+    );
+  }
+
+  async handle(message: TgMessage): Promise<void> {
+    await this.safely(message.chatId, () => this.route(message));
+  }
+
+  /** Finishes albums still waiting for their last photo. Call at shutdown. */
+  async stop(): Promise<void> {
+    await this.albums.flushAll();
+  }
+
+  private async route(message: TgMessage): Promise<void> {
+    if (message.fromIsBot || message.fromId === undefined) return;
+    const { telegram } = this.deps.config;
+
+    if (message.chatType !== 'private') {
+      if (message.command?.name === 'bind') await this.say(message.chatId, telegram.replies.groupBind);
+      return;
+    }
+
+    const command = message.command;
+    if (command?.name === 'bind') return this.bind(message, command.args);
+    // Once the campaign is over nobody is invited to submit: the instructions would only lead to "ended".
+    if (command?.name === 'start') return this.say(message.chatId, this.ended(message) ? this.deps.config.replies.ended : telegram.welcome);
+    if (command?.name === 'help') return this.say(message.chatId, this.ended(message) ? this.deps.config.replies.ended : this.helpText);
+
+    if (message.images.length > 0) {
+      if (message.mediaGroupId === undefined) await this.submitImages([message]);
+      else if (this.albums.add(message) === 'late') await this.copyLatePart(message);
+      return;
+    }
+    return this.textMessage(message);
+  }
+
+  private async bind(message: TgMessage, args: string): Promise<void> {
+    const { config, binds, writer, log } = this.deps;
+    const userId = String(message.fromId);
+    if (args === '') return this.say(message.chatId, config.telegram.replies.bindUsage);
+
+    const id = normalizeBindId(args);
+    if (!config.bind.idPattern.test(id)) {
+      log.info('bind rejected: invalid ID', { platform: 'telegram', user: userId });
+      return this.say(message.chatId, config.telegram.replies.bindInvalid);
+    }
+
+    let row: BindRow;
+    try {
+      row = binds.prepare('telegram', userId, message.username, id, message.date);
+      writer.record({ id: `tg:bind:${message.chatId}:${message.messageId}`, kind: 'bind', row });
+      binds.apply(row);
+    } catch (err) {
+      log.error('bind not saved', { platform: 'telegram', user: userId, err });
+      return this.say(message.chatId, config.bind.replies.error);
+    }
+    log.info('bind saved', { platform: 'telegram', user: userId, duplicateUid: row.duplicate_uid });
+    await this.say(message.chatId, config.bind.replies.success);
+  }
+
+  /** A message with no image: a link is a content submission, a quest name alone is a reminder, anything else gets help. */
+  private async textMessage(message: TgMessage): Promise<void> {
+    const { config, matcher } = this.deps;
+    const text = message.text ?? message.caption ?? '';
+    const link = firstLinkIn(text, message.entities);
+    const bound = this.deps.binds.lookup('telegram', String(message.fromId)) !== undefined;
+
+    if (this.ended(message)) return this.say(message.chatId, config.replies.ended);
+    if (link === undefined && matcher.match(text).kind === 'none') return this.say(message.chatId, this.helpText);
+    if (link === undefined) {
+      return this.say(message.chatId, this.withUnboundReminder(config.telegram.replies.noImage, bound));
+    }
+    await this.submitLink(message, text, link, bound);
+  }
+
+  private async submitLink(message: TgMessage, text: string, link: string, bound: boolean): Promise<void> {
+    const { config, binds } = this.deps;
+    const bind = binds.lookup('telegram', String(message.fromId));
+    const questType = config.telegram.linkQuestType;
+    const id = `tg:sub:${message.chatId}:${message.messageId}`;
+    if (this.deps.writer.has(id)) return; // delivered twice
+
+    const messageLink = await this.copyToReview(message, [message.messageId], {
+      questType,
+      fuzzy: false,
+      uid: bind?.uid,
+      text,
+    });
+    const row = buildSubmissionRow(
+      {
+        createdAt: message.date,
+        authorId: String(message.fromId),
+        authorUsername: message.username,
+        channelName: TELEGRAM_CHANNEL_NAME,
+        content: text,
+        url: messageLink,
+      },
+      { platform: 'telegram', questType, fuzzy: false, attachmentUrl: '', bind, linkUrl: link },
+    );
+    if (!this.record(message.chatId, id, row)) return await this.say(message.chatId, config.telegram.replies.error);
+    await this.say(message.chatId, this.withUnboundReminder(config.telegram.replies.ugcLogged, bound));
+  }
+
+  /**
+   * A photo of an album that arrived after the album was logged. It is not a submission of
+   * its own, so there is no second row and no second reply; it only goes to the reviewers,
+   * so the evidence is not lost.
+   */
+  private async copyLatePart(message: TgMessage): Promise<void> {
+    if (this.ended(message)) return;
+    const { api, log } = this.deps;
+    log.info('a photo arrived after its album was logged; copying it to the review channel only', { chat: message.chatId });
+    await api.copyMoreToReview({ fromChatId: message.chatId, messageIds: [message.messageId] }).catch((err: unknown) => {
+      log.warn('could not copy a late album photo to the review channel', { err });
+    });
+  }
+
+  /** One or more photos from one member become one submission: the caption may sit on any of them. */
+  private async submitImages(parts: TgMessage[]): Promise<void> {
+    const { config, matcher, binds } = this.deps;
+    const first = parts[0];
+    if (first === undefined) return;
+    const captioned = parts.find((p) => (p.caption ?? '').trim() !== '');
+    const caption = captioned?.caption ?? '';
+    const bind = binds.lookup('telegram', String(first.fromId));
+    const bound = bind !== undefined;
+
+    if (this.ended(first)) return this.say(first.chatId, config.replies.ended);
+
+    const outcome = classifyImageMessage({ text: caption, hasImage: true, bound }, matcher);
+    if (outcome.action !== 'log') return;
+    const id = `tg:sub:${first.chatId}:${first.messageId}`;
+    if (this.deps.writer.has(id)) return; // delivered twice
+
+    const messageIds = parts.map((p) => p.messageId);
+    const messageLink = await this.copyToReview(first, messageIds, {
+      questType: outcome.questType,
+      fuzzy: outcome.fuzzy,
+      uid: bind?.uid,
+      text: caption,
+    });
+    const fileId = first.images[0]?.fileId ?? '';
+    const row = buildSubmissionRow(
+      {
+        createdAt: first.date,
+        authorId: String(first.fromId),
+        authorUsername: first.username,
+        channelName: TELEGRAM_CHANNEL_NAME,
+        content: caption,
+        url: messageLink,
+      },
+      {
+        platform: 'telegram',
+        questType: outcome.questType,
+        fuzzy: outcome.fuzzy,
+        // The file_id, never a download URL: that would contain the bot token.
+        attachmentUrl: fileId,
+        bind,
+        ...(captioned ? { linkUrl: firstLinkIn(caption, captioned.entities) ?? '' } : {}),
+      },
+    );
+    if (!this.record(first.chatId, id, row)) return await this.say(first.chatId, config.telegram.replies.error);
+
+    const { replies } = config.telegram;
+    const text =
+      caption.trim() === ''
+        ? replies.noCaption
+        : outcome.reaction === 'success'
+          ? replies.logged.replaceAll('{quest}', questNameFor(config.quests, outcome.questType))
+          : replies.unmatched;
+    await this.say(first.chatId, this.withUnboundReminder(text, bound));
+  }
+
+  /**
+   * Makes the row durable before anything is promised. Returns false, after telling
+   * the log loudly, if it could not: the member is then told to try again.
+   */
+  private record(chatId: number, id: string, row: SubmissionRow): boolean {
+    try {
+      this.deps.writer.record({ id, kind: 'submission', row });
+      this.deps.log.info('submission logged', {
+        platform: 'telegram',
+        chat: chatId,
+        user: row.user_id,
+        questType: row.quest_type,
+        fuzzy: row.fuzzy_match,
+        bound: row.bound,
+      });
+      return true;
+    } catch (err) {
+      // Last resort: the row goes to the host's logs so it can be recovered by hand.
+      this.deps.log.error('SUBMISSION NOT SAVED: write-ahead log failed', { err, row: JSON.stringify(row) });
+      return false;
+    }
+  }
+
+  /**
+   * Copies the submission into the private review channel and returns the link to the
+   * copy. If the copy fails the submission is still logged: the row then carries a
+   * placeholder that can't be opened but is unique per message, and the file_id still
+   * identifies the evidence.
+   */
+  private async copyToReview(
+    message: TgMessage,
+    messageIds: number[],
+    info: { questType: string; fuzzy: boolean; uid: string | undefined; text: string },
+  ): Promise<string> {
+    const { api, log, reviewChannelId } = this.deps;
+    const [firstId, ...rest] = messageIds;
+    const fallback = `tg-dm:${message.chatId}/${firstId ?? message.messageId}`;
+    if (firstId === undefined) return fallback;
+    try {
+      const copied = await api.copyToReview({
+        fromChatId: message.chatId,
+        messageId: firstId,
+        caption: reviewCaption({ ...info, userId: String(message.fromId), username: message.username }),
+      });
+      if (rest.length > 0) {
+        await api.copyMoreToReview({ fromChatId: message.chatId, messageIds: rest }).catch((err: unknown) => {
+          log.warn('could not copy the rest of an album to the review channel', { err });
+        });
+      }
+      return copied > 0 ? reviewLink(reviewChannelId, copied) : fallback;
+    } catch (err) {
+      log.error('could not copy a submission to the review channel (is the bot an admin there?)', { err });
+      return fallback;
+    }
+  }
+
+  private ended(message: TgMessage): boolean {
+    return hasEnded(this.deps.campaignEnd, message.date);
+  }
+
+  private withUnboundReminder(text: string, bound: boolean): string {
+    return bound ? text : `${text}\n\n${this.deps.config.telegram.replies.unbound}`;
+  }
+
+  private async say(chatId: number, text: string): Promise<void> {
+    try {
+      await this.deps.api.sendMessage(chatId, text);
+    } catch (err) {
+      // For example the member blocked the bot. The row, if any, is already saved.
+      this.deps.log.warn('could not send a reply', { chat: chatId, err });
+    }
+  }
+
+  private async safely(chatId: number | undefined, work: () => Promise<void>): Promise<void> {
+    try {
+      await work();
+    } catch (err) {
+      this.deps.log.error('Telegram handler failed', { err });
+      if (chatId !== undefined) await this.say(chatId, this.deps.config.telegram.replies.error);
+    }
+  }
+}
+
+/** t.me/c/<channel>/<message>: a private channel's ID minus its -100 prefix. */
+export function reviewLink(channelId: string, messageId: number): string {
+  return `https://t.me/c/${channelId.replace(/^-100/, '')}/${messageId}`;
+}
+
+/** What the review channel shows next to a copied submission. */
+export function reviewCaption(info: {
+  userId: string;
+  username: string;
+  uid: string | undefined;
+  questType: string;
+  fuzzy: boolean;
+  text: string;
+}): string {
+  const head = `User ${info.userId} ${info.username} | UID ${info.uid ?? 'not linked'} | ${info.questType}${info.fuzzy ? ' (flagged for review)' : ''}`;
+  const text = info.text.trim();
+  const full = text === '' ? head : `${head}\n\n${text}`;
+  return full.length <= CAPTION_LIMIT ? full : `${full.slice(0, CAPTION_LIMIT - 1)}…`;
+}

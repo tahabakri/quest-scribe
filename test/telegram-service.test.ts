@@ -1,0 +1,684 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { BindStore } from '../src/binds.js';
+import { parseConfig } from '../src/config.js';
+import type { Logger } from '../src/logger.js';
+import { QuestMatcher } from '../src/matcher.js';
+import { TELEGRAM_CHANNEL_NAME, TelegramService, reviewCaption, reviewLink } from '../src/telegram/service.js';
+import type { TelegramApiPort, TgEntity, TgMessage } from '../src/telegram/types.js';
+import type { WalEntry } from '../src/wal.js';
+
+const REVIEW_CHANNEL = '-1001234567890';
+const USER = 5000;
+
+const config = parseConfig(
+  {
+    origin: 'test',
+    text: `
+quests:
+  - keyword: share post
+    type: share_post
+    name: Share Post
+  - keyword: sharing post
+    type: share_post
+    review: true
+  - keyword: boost post
+    type: boost_post
+    name: Boost Post
+  - keyword: join
+    type: event_join
+    strict: true
+    name: Event Join
+  - keyword: join event
+    type: event_join
+bind:
+  command_description: Link your account
+  id_label: uid
+  id_description: Your account ID
+  replies: { success: "Linked!", invalid: "Invalid ID.", error: "Bind failed." }
+replies: { unmatched: a, no_image: b, unbound: c, ended: "Season over." }
+telegram:
+  welcome: "Welcome!"
+  link_quest_type: ugc
+  replies:
+    bind_usage: "Usage: /bind 123456789"
+    bind_invalid: "Not a valid ID."
+    group_bind: "Message me privately."
+    logged: "Done: {quest}. Cheers!"
+    unmatched: "No match. Saved."
+    no_caption: "Saved. Add a caption."
+    no_image: "Attach a screenshot."
+    unbound: "Run /bind first."
+    ugc_logged: "Logged your link."
+    error: "Something broke."
+`,
+  },
+  {},
+);
+
+function memoryLogger() {
+  const lines: { level: string; message: string; fields?: unknown }[] = [];
+  const log: Logger = {
+    debug: () => {},
+    info: (message, fields) => lines.push({ level: 'info', message, fields }),
+    warn: (message, fields) => lines.push({ level: 'warn', message, fields }),
+    error: (message, fields) => lines.push({ level: 'error', message, fields }),
+    child: () => log,
+  };
+  return { log, lines };
+}
+
+interface Options {
+  end?: Date;
+  record?: (entry: WalEntry) => boolean;
+  copy?: (args: { fromChatId: number; messageId: number; caption: string }) => Promise<number>;
+  copyMore?: (args: { fromChatId: number; messageIds: number[] }) => Promise<void>;
+  send?: (chatId: number, text: string) => Promise<void>;
+  matcher?: QuestMatcher;
+}
+
+function setup(options: Options = {}) {
+  const sent: { chatId: number; text: string }[] = [];
+  const copies: { fromChatId: number; messageId: number; caption: string }[] = [];
+  const more: { fromChatId: number; messageIds: number[] }[] = [];
+  const recorded: WalEntry[] = [];
+  const known = new Set<string>();
+  let reviewId = 700;
+  const api: TelegramApiPort = {
+    sendMessage: async (chatId, text) => {
+      if (options.send) await options.send(chatId, text);
+      sent.push({ chatId, text });
+    },
+    copyToReview: async (args) => {
+      copies.push(args);
+      return options.copy ? options.copy(args) : ++reviewId;
+    },
+    copyMoreToReview: async (args) => {
+      more.push(args);
+      await options.copyMore?.(args);
+    },
+  };
+  const binds = new BindStore();
+  const { log, lines } = memoryLogger();
+  const service = new TelegramService({
+    config,
+    matcher: options.matcher ?? new QuestMatcher(config.quests, config.fuzzyThreshold),
+    binds,
+    writer: {
+      has: (id) => known.has(id),
+      record: (entry) => {
+        if (options.record) return options.record(entry);
+        if (known.has(entry.id)) return false;
+        known.add(entry.id);
+        recorded.push(entry);
+        return true;
+      },
+    },
+    api,
+    reviewChannelId: REVIEW_CHANNEL,
+    campaignEnd: options.end,
+    log,
+    albumWaitMs: 1000,
+  });
+  const bindUser = (uid = '123456', userId = String(USER)) =>
+    binds.apply(binds.prepare('telegram', userId, '@member', uid, new Date('2026-10-01T00:00:00Z')));
+  const submissions = () => recorded.filter((e) => e.kind === 'submission').map((e) => e.row);
+  const replies = () => sent.map((s) => s.text);
+  return { service, binds, bindUser, sent, copies, more, recorded, submissions, replies, lines };
+}
+
+let seq = 0;
+function msg(overrides: Partial<TgMessage> = {}): TgMessage {
+  const messageId = overrides.messageId ?? ++seq + 1000;
+  return {
+    chatId: USER,
+    chatType: 'private',
+    messageId,
+    date: new Date('2026-11-01T10:00:00Z'),
+    fromId: USER,
+    fromIsBot: false,
+    username: '@member',
+    text: undefined,
+    caption: undefined,
+    entities: [],
+    command: undefined,
+    images: [],
+    mediaGroupId: undefined,
+    ...overrides,
+  };
+}
+const photo = (caption?: string, overrides: Partial<TgMessage> = {}): TgMessage => {
+  const messageId = overrides.messageId ?? ++seq + 1000;
+  return msg({ messageId, caption, images: [{ fileId: `FILE-${messageId}`, messageId }], ...overrides });
+};
+const text = (value: string, overrides: Partial<TgMessage> = {}): TgMessage => msg({ text: value, ...overrides });
+const command = (name: string, args = '', overrides: Partial<TgMessage> = {}): TgMessage =>
+  msg({ text: `/${name} ${args}`.trim(), command: { name, args }, ...overrides });
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('/start and /help', () => {
+  it('/start sends the welcome text', async () => {
+    const t = setup();
+    await t.service.handle(command('start'));
+    await t.service.handle(command('start', 'quests')); // the deep link payload
+    expect(t.replies()).toEqual(['Welcome!', 'Welcome!']);
+  });
+
+  it('/help adds the quest names: the first keyword of each quest that is not a close variant, in config order', async () => {
+    const t = setup();
+    await t.service.handle(command('help'));
+    expect(t.replies()).toEqual(['Welcome!\n\nQuest names, to use as the caption:\n- share post\n- boost post\n- join']);
+  });
+
+  it('plain text with no link and no quest name also gets the help text, and logs nothing', async () => {
+    const t = setup();
+    await t.service.handle(text('hello there'));
+    expect(t.replies()[0]).toContain('Quest names');
+    expect(t.recorded).toHaveLength(0);
+  });
+});
+
+describe('/bind', () => {
+  it('saves a valid ID for the Telegram member, with the platform, and confirms', async () => {
+    const t = setup();
+    const m = command('bind', '766000123');
+    await t.service.handle(m);
+    expect(t.replies()).toEqual(['Linked!']);
+    expect(t.recorded).toEqual([
+      {
+        id: `tg:bind:${USER}:${m.messageId}`,
+        kind: 'bind',
+        row: {
+          timestamp_utc: '2026-11-01T10:00:00Z',
+          user_id: String(USER),
+          username: '@member',
+          uid: '766000123',
+          duplicate_uid: false,
+          last_updated_utc: '2026-11-01T10:00:00Z',
+          platform: 'telegram',
+        },
+      },
+    ]);
+    expect(t.binds.lookup('telegram', String(USER))?.uid).toBe('766000123');
+    expect(t.binds.lookup('discord', String(USER))).toBeUndefined();
+  });
+
+  it.each([
+    ['letters', '12ab34'],
+    ['too short (5 digits)', '12345'],
+    ['too long (16 digits)', '1234567890123456'],
+    ['spaces inside', '123 456'],
+  ])('rejects %s and saves nothing', async (_label, value) => {
+    const t = setup();
+    await t.service.handle(command('bind', value));
+    expect(t.replies()).toEqual(['Not a valid ID.']);
+    expect(t.recorded).toHaveLength(0);
+    expect(t.binds.size).toBe(0);
+  });
+
+  it('answers /bind with no ID by showing the usage', async () => {
+    const t = setup();
+    await t.service.handle(command('bind'));
+    expect(t.replies()).toEqual(['Usage: /bind 123456789']);
+    expect(t.recorded).toHaveLength(0);
+  });
+
+  it('accepts digits typed on other keyboards', async () => {
+    const t = setup();
+    await t.service.handle(command('bind', '١٢٣٤٥٦'));
+    expect(t.binds.lookup('telegram', String(USER))?.uid).toBe('123456');
+  });
+
+  it('re-binding updates the same member: one member, first-bound time kept', async () => {
+    const t = setup();
+    await t.service.handle(command('bind', '111111', { date: new Date('2026-11-01T10:00:00Z') }));
+    await t.service.handle(command('bind', '222222', { date: new Date('2026-11-02T10:00:00Z') }));
+    expect(t.binds.size).toBe(1);
+    const second = t.recorded[1]!.row as { timestamp_utc: string; uid: string; last_updated_utc: string };
+    expect(second).toMatchObject({ uid: '222222', timestamp_utc: '2026-11-01T10:00:00Z', last_updated_utc: '2026-11-02T10:00:00Z' });
+  });
+
+  it('flags an ID already bound on Discord, still saves it, and still confirms', async () => {
+    const t = setup();
+    t.binds.apply(t.binds.prepare('discord', '100000000000000001', 'on_discord', '555555', new Date('2026-10-01T00:00:00Z')));
+    await t.service.handle(command('bind', '555555'));
+    expect(t.recorded[0]!.row).toMatchObject({ uid: '555555', duplicate_uid: true, platform: 'telegram' });
+    expect(t.replies()).toEqual(['Linked!']);
+  });
+
+  it('flags an ID bound by a different Telegram member too', async () => {
+    const t = setup();
+    t.bindUser('555555', '7777');
+    await t.service.handle(command('bind', '555555'));
+    expect(t.recorded[0]!.row).toMatchObject({ duplicate_uid: true });
+  });
+
+  it('says so, and saves nothing, when the bind cannot be made durable', async () => {
+    const t = setup({
+      record: () => {
+        throw new Error('disk full');
+      },
+    });
+    await t.service.handle(command('bind', '123456'));
+    expect(t.replies()).toEqual(['Bind failed.']);
+    expect(t.binds.size).toBe(0);
+  });
+
+  it('in a group: asks the member to write privately, saves nothing', async () => {
+    const t = setup();
+    await t.service.handle(command('bind', '123456', { chatId: -100999, chatType: 'supergroup' }));
+    expect(t.sent).toEqual([{ chatId: -100999, text: 'Message me privately.' }]);
+    expect(t.recorded).toHaveLength(0);
+    expect(t.binds.size).toBe(0);
+  });
+});
+
+describe('what the bot ignores', () => {
+  it.each([
+    ['text in a group', text('share post', { chatId: -100999, chatType: 'group' })],
+    ['a photo in a group', photo('share post', { chatId: -100999, chatType: 'supergroup' })],
+    ['a link in a group', text('https://example.com/x', { chatId: -100999, chatType: 'group' })],
+    ['/start in a group', command('start', '', { chatId: -100999, chatType: 'group' })],
+    ['a channel post', text('share post', { chatType: 'channel', fromId: undefined })],
+    ['a message from a bot', photo('share post', { fromIsBot: true })],
+    ['a message with no sender', photo('share post', { fromId: undefined })],
+  ])('%s', async (_label, message) => {
+    const t = setup();
+    await t.service.handle(message);
+    expect(t.sent).toHaveLength(0);
+    expect(t.recorded).toHaveLength(0);
+    expect(t.copies).toHaveLength(0);
+  });
+});
+
+describe('image submissions', () => {
+  it('logs a photo with a quest caption, copies it for review, and says what was logged', async () => {
+    const t = setup();
+    t.bindUser('123456');
+    const m = photo('Share Post ✅');
+    await t.service.handle(m);
+
+    expect(t.submissions()).toEqual([
+      {
+        timestamp_utc: '2026-11-01T10:00:00Z',
+        user_id: String(USER),
+        username: '@member',
+        uid: '123456',
+        bound: true,
+        quest_type: 'share_post',
+        fuzzy_match: false,
+        channel_name: TELEGRAM_CHANNEL_NAME,
+        message_text: 'Share Post ✅',
+        attachment_url: `FILE-${m.messageId}`,
+        link_url: '',
+        message_link: 'https://t.me/c/1234567890/701',
+        date_utc: '2026-11-01',
+        platform: 'telegram',
+      },
+    ]);
+    expect(t.recorded[0]!.id).toBe(`tg:sub:${USER}:${m.messageId}`);
+    expect(t.copies).toEqual([
+      { fromChatId: USER, messageId: m.messageId, caption: `User ${USER} @member | UID 123456 | share_post\n\nShare Post ✅` },
+    ]);
+    expect(t.replies()).toEqual(['Done: Share Post. Cheers!']);
+  });
+
+  it('never stores a download URL: attachment_url is the bare file_id, and the token appears nowhere', async () => {
+    const t = setup();
+    await t.service.handle(photo('share post'));
+    const row = t.submissions()[0]!;
+    expect(row.attachment_url).toMatch(/^FILE-\d+$/);
+    expect(JSON.stringify(t.recorded)).not.toMatch(/api\.telegram\.org|https?:\/\/[^"]*bot\d/);
+  });
+
+  it('keeps a specific quest from being logged as a sibling that shares a word', async () => {
+    const t = setup();
+    await t.service.handle(photo('boost post'));
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'boost_post', fuzzy_match: false });
+  });
+
+  it('flags a typo for review (fuzzy_match = TRUE) and still logs it as that quest', async () => {
+    const t = setup();
+    await t.service.handle(photo('share pst'));
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'share_post', fuzzy_match: true });
+    expect(t.replies()[0]).toMatch(/^Done: Share Post\./);
+    expect(t.copies[0]!.caption).toContain('(flagged for review)');
+  });
+
+  it('flags a close variant of the official caption the same way', async () => {
+    const t = setup();
+    await t.service.handle(photo('sharing post'));
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'share_post', fuzzy_match: true });
+  });
+
+  it('logs a caption that matches nothing as unmatched, keeps the raw text, and says it was saved', async () => {
+    const t = setup();
+    t.bindUser();
+    await t.service.handle(photo('look at my setup'));
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'unmatched', fuzzy_match: false, message_text: 'look at my setup' });
+    expect(t.replies()).toEqual(['No match. Saved.']);
+  });
+
+  it('logs a photo with no caption as unmatched and asks for the quest name next time', async () => {
+    const t = setup();
+    t.bindUser();
+    await t.service.handle(photo(undefined));
+    await t.service.handle(photo('   '));
+    expect(t.submissions().map((s) => [s.quest_type, s.message_text])).toEqual([
+      ['unmatched', ''],
+      ['unmatched', ''], // a blank caption is saved as no caption
+    ]);
+    expect(t.replies()).toEqual(['Saved. Add a caption.', 'Saved. Add a caption.']);
+  });
+
+  it('logs an unbound member (bound = FALSE, uid blank) and adds the /bind reminder', async () => {
+    const t = setup();
+    await t.service.handle(photo('share post'));
+    expect(t.submissions()[0]).toMatchObject({ bound: false, uid: '', quest_type: 'share_post' });
+    expect(t.replies()).toEqual(['Done: Share Post. Cheers!\n\nRun /bind first.']);
+    expect(t.copies[0]!.caption).toContain('UID not linked');
+  });
+
+  it('does not count a Discord member with the same numeric ID as bound', async () => {
+    const t = setup();
+    t.binds.apply(t.binds.prepare('discord', String(USER), 'on_discord', '999999', new Date('2026-10-01T00:00:00Z')));
+    await t.service.handle(photo('share post'));
+    expect(t.submissions()[0]).toMatchObject({ bound: false, uid: '' });
+  });
+
+  it('a quest name without a screenshot is not logged: the member is reminded', async () => {
+    const t = setup();
+    t.bindUser();
+    await t.service.handle(text('share post'));
+    expect(t.recorded).toHaveLength(0);
+    expect(t.copies).toHaveLength(0);
+    expect(t.replies()).toEqual(['Attach a screenshot.']);
+  });
+
+  it('a typo of a quest name without a screenshot gets the same reminder', async () => {
+    const t = setup();
+    t.bindUser();
+    await t.service.handle(text('share pst'));
+    expect(t.replies()).toEqual(['Attach a screenshot.']);
+  });
+
+  it('uses strict keywords as whole words: "joint" is not the Event Join quest', async () => {
+    const t = setup();
+    t.bindUser();
+    await t.service.handle(photo('join'));
+    await t.service.handle(photo('joint'));
+    expect(t.submissions().map((s) => s.quest_type)).toEqual(['event_join', 'unmatched']);
+  });
+
+  it('is logged once if Telegram delivers the same message twice', async () => {
+    const t = setup();
+    const m = photo('share post');
+    await t.service.handle(m);
+    await t.service.handle(m);
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.copies).toHaveLength(1);
+    expect(t.replies()).toHaveLength(1);
+  });
+
+  it('records the time the member sent it, not the time it was processed', async () => {
+    const t = setup();
+    await t.service.handle(photo('share post', { date: new Date('2026-11-03T23:59:58Z') }));
+    expect(t.submissions()[0]).toMatchObject({ timestamp_utc: '2026-11-03T23:59:58Z', date_utc: '2026-11-03' });
+  });
+});
+
+describe('albums', () => {
+  it('logs one row for an album of three photos, using the caption from whichever photo has it', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    t.bindUser();
+    const group = 'album-1';
+    const a = photo(undefined, { messageId: 2001, mediaGroupId: group });
+    const b = photo('boost post', { messageId: 2002, mediaGroupId: group });
+    const c = photo(undefined, { messageId: 2003, mediaGroupId: group });
+    // Telegram does not promise the order.
+    await t.service.handle(c);
+    await t.service.handle(a);
+    await t.service.handle(b);
+    expect(t.recorded).toHaveLength(0); // still waiting for the last photo
+
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'boost_post', message_text: 'boost post', attachment_url: 'FILE-2001' });
+    expect(t.recorded[0]!.id).toBe(`tg:sub:${USER}:2001`);
+    expect(t.copies).toHaveLength(1);
+    expect(t.copies[0]).toMatchObject({ messageId: 2001 });
+    expect(t.more).toEqual([{ fromChatId: USER, messageIds: [2002, 2003] }]);
+    expect(t.replies()).toEqual(['Done: Boost Post. Cheers!']);
+  });
+
+  it('keeps the album in the submission even if copying the rest fails', async () => {
+    vi.useFakeTimers();
+    const t = setup({ copyMore: () => Promise.reject(new Error('flood')) });
+    t.bindUser();
+    await t.service.handle(photo('share post', { messageId: 2101, mediaGroupId: 'g' }));
+    await t.service.handle(photo(undefined, { messageId: 2102, mediaGroupId: 'g' }));
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.lines.some((l) => l.level === 'warn' && /rest of an album/.test(l.message))).toBe(true);
+  });
+
+  it('does not log a second row for a photo that arrives after its album was already logged', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    t.bindUser();
+    await t.service.handle(photo('share post', { messageId: 2151, mediaGroupId: 'slow' }));
+    await t.service.handle(photo(undefined, { messageId: 2152, mediaGroupId: 'slow' }));
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.replies()).toEqual(['Done: Share Post. Cheers!']);
+
+    await t.service.handle(photo(undefined, { messageId: 2153, mediaGroupId: 'slow' })); // slow to arrive
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(t.submissions()).toHaveLength(1); // still one row
+    expect(t.replies()).toHaveLength(1); // and no confusing second reply
+    expect(t.more).toEqual([{ fromChatId: USER, messageIds: [2152] }, { fromChatId: USER, messageIds: [2153] }]); // but the image still reaches the reviewers
+  });
+
+  it('treats albums from two members, or two albums, as separate submissions', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    await t.service.handle(photo('share post', { messageId: 2201, mediaGroupId: 'same-id' }));
+    await t.service.handle(photo('boost post', { messageId: 2202, mediaGroupId: 'same-id', chatId: 6000, fromId: 6000 }));
+    await t.service.handle(photo('share post', { messageId: 2203, mediaGroupId: 'other' }));
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(t.submissions()).toHaveLength(3);
+  });
+
+  it('finishes an album still waiting when the bot shuts down', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    await t.service.handle(photo('share post', { messageId: 2301, mediaGroupId: 'g' }));
+    await t.service.handle(photo(undefined, { messageId: 2302, mediaGroupId: 'g' }));
+    await t.service.stop();
+    expect(t.submissions()).toHaveLength(1);
+  });
+});
+
+describe('link submissions', () => {
+  it('logs a message with a link and no image as the configured link quest, and copies it for review', async () => {
+    const t = setup();
+    t.bindUser('123456');
+    const m = text('my write-up https://example.com/post/1 enjoy');
+    await t.service.handle(m);
+    expect(t.submissions()[0]).toMatchObject({
+      quest_type: 'ugc',
+      link_url: 'https://example.com/post/1',
+      attachment_url: '',
+      message_text: 'my write-up https://example.com/post/1 enjoy',
+      channel_name: TELEGRAM_CHANNEL_NAME,
+      message_link: 'https://t.me/c/1234567890/701',
+      platform: 'telegram',
+      uid: '123456',
+    });
+    expect(t.copies[0]).toMatchObject({ messageId: m.messageId });
+    expect(t.replies()).toEqual(['Logged your link.']);
+  });
+
+  it('finds a link hidden behind words, which is not in the text at all', async () => {
+    const t = setup();
+    const hidden: TgEntity = { type: 'text_link', offset: 3, length: 8, url: 'https://example.com/hidden' };
+    await t.service.handle(text('my video', { entities: [hidden] }));
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'ugc', link_url: 'https://example.com/hidden' });
+  });
+
+  it('prefers a link over a quest name when a message has both and no image', async () => {
+    const t = setup();
+    await t.service.handle(text('share post https://example.com/p'));
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'ugc' });
+  });
+
+  it('adds the /bind reminder for an unbound member', async () => {
+    const t = setup();
+    await t.service.handle(text('https://example.com/p'));
+    expect(t.submissions()[0]).toMatchObject({ bound: false });
+    expect(t.replies()).toEqual(['Logged your link.\n\nRun /bind first.']);
+  });
+
+  it('ignores addresses without a scheme, as the Discord side does', async () => {
+    const t = setup();
+    await t.service.handle(text('see example.com/page'));
+    expect(t.recorded).toHaveLength(0);
+    expect(t.replies()[0]).toContain('Quest names');
+  });
+});
+
+describe('after the campaign ends', () => {
+  const END = new Date('2026-11-22T23:59:59Z');
+
+  it('answers submissions with the ended message and logs nothing: image, link, and quest name alike', async () => {
+    const t = setup({ end: END });
+    const late = new Date('2026-11-23T00:00:00Z');
+    await t.service.handle(photo('share post', { date: late }));
+    await t.service.handle(text('https://example.com/p', { date: late }));
+    await t.service.handle(text('share post', { date: late }));
+    expect(t.replies()).toEqual(['Season over.', 'Season over.', 'Season over.']);
+    expect(t.recorded).toHaveLength(0);
+    expect(t.copies).toHaveLength(0);
+  });
+
+  it('still logs a message sent in time that is only processed later (for example after downtime)', async () => {
+    const t = setup({ end: END });
+    await t.service.handle(photo('share post', { date: new Date('2026-11-22T23:59:59Z') }));
+    expect(t.submissions()).toHaveLength(1);
+  });
+
+  it('does not invite anyone to submit: /start, /help and plain chat say the campaign ended, and /bind still works', async () => {
+    const t = setup({ end: END });
+    const late = new Date('2026-12-01T00:00:00Z');
+    await t.service.handle(command('start', '', { date: late }));
+    await t.service.handle(command('help', '', { date: late }));
+    await t.service.handle(text('hello', { date: late }));
+    await t.service.handle(command('bind', '123456', { date: late }));
+    expect(t.replies()).toEqual(['Season over.', 'Season over.', 'Season over.', 'Linked!']);
+    expect(t.binds.size).toBe(1);
+  });
+
+  it('still shows the welcome and help text on the last day', async () => {
+    const t = setup({ end: END });
+    await t.service.handle(command('start', '', { date: new Date('2026-11-22T23:59:59Z') }));
+    expect(t.replies()).toEqual(['Welcome!']);
+  });
+
+  it('ignores a photo that arrives late for an album that was already answered as ended', async () => {
+    vi.useFakeTimers();
+    const t = setup({ end: END });
+    const late = new Date('2026-11-23T00:00:00Z');
+    await t.service.handle(photo('share post', { messageId: 2451, mediaGroupId: 'g', date: late }));
+    await vi.advanceTimersByTimeAsync(1100);
+    await t.service.handle(photo(undefined, { messageId: 2452, mediaGroupId: 'g', date: late }));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(t.replies()).toEqual(['Season over.']);
+    expect(t.more).toHaveLength(0);
+  });
+
+  it('answers a late album once', async () => {
+    vi.useFakeTimers();
+    const t = setup({ end: END });
+    const late = new Date('2026-11-23T00:00:00Z');
+    await t.service.handle(photo('share post', { messageId: 2401, mediaGroupId: 'g', date: late }));
+    await t.service.handle(photo(undefined, { messageId: 2402, mediaGroupId: 'g', date: late }));
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(t.replies()).toEqual(['Season over.']);
+    expect(t.recorded).toHaveLength(0);
+  });
+});
+
+describe('when something goes wrong', () => {
+  it('still logs the submission, with a placeholder link, if the review copy fails', async () => {
+    const t = setup({ copy: () => Promise.reject(new Error('chat not found')) });
+    const m = photo('share post');
+    await t.service.handle(m);
+    expect(t.submissions()[0]).toMatchObject({
+      quest_type: 'share_post',
+      message_link: `tg-dm:${USER}/${m.messageId}`,
+      attachment_url: `FILE-${m.messageId}`,
+    });
+    expect(t.lines.some((l) => l.level === 'error' && /review channel/.test(l.message))).toBe(true);
+    expect(t.replies()[0]).toMatch(/^Done:/);
+  });
+
+  it('uses the placeholder too when Telegram answers with a scheduled message (id 0)', async () => {
+    const t = setup({ copy: () => Promise.resolve(0) });
+    const m = photo('share post');
+    await t.service.handle(m);
+    expect(t.submissions()[0]!.message_link).toBe(`tg-dm:${USER}/${m.messageId}`);
+  });
+
+  it('never says "Logged" when the row could not be made durable, and logs the row for manual recovery', async () => {
+    const t = setup({
+      record: () => {
+        throw new Error('disk full');
+      },
+    });
+    await t.service.handle(photo('share post'));
+    expect(t.replies()).toEqual(['Something broke.']);
+    const failure = t.lines.find((l) => l.message.startsWith('SUBMISSION NOT SAVED'));
+    expect(failure?.level).toBe('error');
+    expect(JSON.stringify(failure?.fields)).toContain('share_post');
+  });
+
+  it('keeps the row when the reply cannot be sent (for example the member blocked the bot)', async () => {
+    const t = setup({ send: () => Promise.reject(new Error('Forbidden: bot was blocked by the user')) });
+    await expect(t.service.handle(photo('share post'))).resolves.toBeUndefined();
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.lines.some((l) => l.level === 'warn' && /could not send a reply/.test(l.message))).toBe(true);
+  });
+
+  it('survives an unexpected error in the handler, and tells the member', async () => {
+    const broken = new QuestMatcher(config.quests, config.fuzzyThreshold);
+    vi.spyOn(broken, 'match').mockImplementation(() => {
+      throw new Error('boom');
+    });
+    const t = setup({ matcher: broken });
+    await expect(t.service.handle(photo('share post'))).resolves.toBeUndefined();
+    expect(t.replies()).toEqual(['Something broke.']);
+    expect(t.lines.some((l) => l.level === 'error' && l.message === 'Telegram handler failed')).toBe(true);
+  });
+});
+
+describe('review channel helpers', () => {
+  it('builds the t.me/c link from a private channel ID', () => {
+    expect(reviewLink('-1001234567890', 42)).toBe('https://t.me/c/1234567890/42');
+  });
+
+  it('keeps the review caption within Telegram\'s 1024 characters, whatever the member wrote', () => {
+    const caption = reviewCaption({ userId: '1', username: '@m', uid: '123456', questType: 'share_post', fuzzy: false, text: 'x'.repeat(5000) });
+    expect(caption.length).toBeLessThanOrEqual(1024);
+    expect(caption.startsWith('User 1 @m | UID 123456 | share_post')).toBe(true);
+    expect(caption.endsWith('…')).toBe(true);
+  });
+
+  it('leaves out the text section when there is no caption', () => {
+    expect(reviewCaption({ userId: '1', username: '@m', uid: undefined, questType: 'unmatched', fuzzy: false, text: '  ' })).toBe(
+      'User 1 @m | UID not linked | unmatched',
+    );
+  });
+});
