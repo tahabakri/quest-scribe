@@ -1,0 +1,91 @@
+# quest-scribe configuration
+#
+# Copy to config.yml (gitignored) and edit, or put the whole file in the
+# CONFIG_YAML environment variable on hosts without file mounts.
+# Any string value may reference an environment variable as "${NAME}".
+#
+# The Discord bot of the same campaign (quest-ledger) reads the same file format, so one
+# quest list can serve both bots. Each ignores the settings that only the other uses:
+# `channels`, `reactions`, `warning_delete_after_seconds`, `replies.unmatched` /
+# `no_image` / `unbound`, a quest's `reply`, and the Discord keys under `bind` are not
+# read here.
+
+# Quests recognised in image submissions. A caption matches a keyword when the keyword
+# appears in it, ignoring case, punctuation, emoji and extra spaces. Longer keywords are
+# checked first. Several keywords may share one type.
+# Optional per quest:
+#   name: what members see for the quest ("Logged: Daily Check-In"); defaults to a
+#         readable form of the type. One name per quest type.
+#   strict: true matches the keyword only as a whole word, with no typo tolerance.
+#         Use it for short keywords ("join" would match inside "joint").
+#   review: true marks a close variant of the official caption (say "sharing post" next
+#         to "share post"): it logs under the same quest but with fuzzy_match = TRUE.
+# The /help list shows the first keyword of each quest that is not a `review` variant,
+# so put the caption you want advertised first.
+quests:
+  - keyword: daily check-in
+    type: daily_check_in
+    name: Daily Check-In
+  - keyword: share post
+    type: share_post
+    name: Share Post
+  - keyword: event attendance
+    type: event_attendance
+    name: Event Attendance
+  - keyword: invite
+    type: invite
+    name: Invite
+
+# Typo tolerance (0-1). When no keyword appears exactly, a run of caption words
+# at least this similar to a keyword (Levenshtein ratio) still counts, and the
+# row is flagged fuzzy_match = TRUE for review. 1 disables fuzzy matching.
+fuzzy_threshold: 0.8
+
+# Linking an external account ID to a member: "/bind 123456" in a private chat.
+bind:
+  id_pattern: '^\d{6,15}$'
+  replies:
+    success: Your account ID has been linked. You're all set.
+    error: Something went wrong saving your ID. Please try again in a minute.
+
+replies:
+  # Sent instead of logging, for a submission sent after CAMPAIGN_END_UTC. /start and
+  # /help answer with it too once the campaign is over.
+  ended: This campaign has ended. Thank you for joining in!
+
+# Everything here is optional: the defaults are generic, so a deployment normally sets
+# its own wording. Plain text, no formatting. Replies go to the member's private chat.
+# telegram:
+#   welcome: |            # the /start text; /help adds the list of quest names
+#     Welcome!
+#
+#     1. Link your account: /bind 123456789
+#     2. Complete a quest
+#     3. Send the screenshot here with the quest name as the caption
+#
+#     To share something you made, just send the link.
+#   help_quests_heading: 'Quest names, to use as the caption:'
+#   link_quest_type: content_link   # quest_type for a message with a link and no image
+#   replies:
+#     bind_usage: 'To link your account, send /bind followed by your ID, for example: /bind 123456789'
+#     bind_invalid: "That doesn't look like a valid ID. Use numbers only, for example: /bind 123456789"
+#     group_bind: Please message me in a private chat to take part.
+#     logged: 'Logged: {quest}. Thank you!'   # {quest} becomes the quest's name
+#     unmatched: "We couldn't match that to a quest, so we've saved it for a person to review. Next time, put the quest name in the caption."
+#     no_caption: 'Saved. Next time, add the quest name as the caption.'
+#     no_image: Please attach a screenshot with your submission.
+#     unbound: Please run /bind with your ID first, so we can link your submissions to your account.
+#     ugc_logged: Logged your link. Thank you!
+#     error: Something went wrong on our side. Please try again in a minute.
+
+# Accepted screenshot types, for photos sent as files.
+image_extensions: [png, jpg, jpeg, gif, webp]
+
+sheets:
+  binds_tab: Binds
+  submissions_tab: Submissions
+  flush_interval_seconds: 5 # write queued rows at least this often...
+  flush_max_rows: 20 # ...or as soon as this many are waiting
+  # Re-read the binds tab this often, to pick up manual edits and binds made by the Discord
+  # bot (0 = never). With two bots sharing a sheet, 1 keeps the duplicate-ID check current.
+  binds_refresh_minutes: 10
