@@ -4,7 +4,7 @@ A Telegram bot that logs community quest submissions (screenshots and links) to 
 
 [![CI](https://github.com/tahabakri/quest-scribe/actions/workflows/ci.yml/badge.svg)](https://github.com/tahabakri/quest-scribe/actions/workflows/ci.yml)
 
-Members link their account ID once in the separate campaign bot, then send proof of completed tasks to this bot in a private chat: a screenshot with the quest name as the caption ("daily check-in"), or a link to something they made. quest-scribe turns every submission into a spreadsheet row that a human can review, and keeps a copy of the evidence in a private channel. It has no binding of its own and never reads the campaign bot's data.
+Members link their account ID once in the separate campaign bot, then send proof of completed tasks to this bot, in a private chat or in your community group: a screenshot with the quest name as the caption ("daily check-in"), or a link to something they made. quest-scribe turns every submission into a spreadsheet row that a human can review, and keeps a copy of the evidence in a private channel. It has no binding of its own and never reads the campaign bot's data.
 
 It is the Telegram half of a pair. Its sibling, [quest-ledger](https://github.com/tahabakri/quest-ledger), does the same on Discord, and both write to the **same sheet** with the same columns, so one campaign can run on both platforms. Either works alone.
 
@@ -37,7 +37,7 @@ flowchart LR
 
 ### What the bot does with each message
 
-Everything happens in a **private chat** with the bot. Telegram has no "only you can see this" replies in groups, and IDs are semi-private, so the bot ignores groups. Promote the bot in your group with a link button to `https://t.me/<BotUsername>?start=quests`.
+Members can submit in a **private chat** with the bot, or **in your community group**, where everyone can see the entries. In the group the bot reads only the group(s) you list in `TG_GROUP_IDS`, reacts only to a photo (or a quest name posted without one), replies to that very message, and stays silent on ordinary chat, commands and bare links, so the group stays readable. Any other group is ignored. In a private chat it also answers `/start` and `/help`, and logs a message with a link as a content submission. Promote the bot in your group with a link button to `https://t.me/<BotUsername>?start=quests`.
 
 | Member sends | Row logged | Reply |
 |---|---|---|
@@ -129,7 +129,7 @@ You need Node.js 22.12 or newer, a Telegram account, and a Google account.
 ### 1. Telegram bot
 
 1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, and choose a name and a username ending in `bot`. Copy the token into `TELEGRAM_BOT_TOKEN`. It is a password: whoever holds it controls the bot. Create the bot from an account your organisation owns, not a personal one, and never paste the token into chat, docs or screenshots.
-2. Send BotFather `/setprivacy`, pick your bot, and choose **Enable**: the bot only needs direct messages. The bot sets its own command menu (`/start`, `/help`) at startup.
+2. Send BotFather `/setprivacy`, pick your bot, and choose **Disable**: with privacy mode on, a bot in a group only sees commands, not the photos members post. If you want submissions in the group, add the bot to the group, and put the group's ID (it starts with `-100`) in `TG_GROUP_IDS`. The bot sets its own command menu (`/start`, `/help`) at startup.
 3. Create a **private channel** for evidence, and add the bot to it as an **administrator** with permission to post messages. Copy the channel's ID, which starts with `-100`, into `TG_REVIEW_CHANNEL_ID` (in Telegram Web it is in the address bar when the channel is open). Anyone who can read this channel sees every screenshot submitted, so add only the people who review them.
 
 At startup the log says `connected to Telegram as @yourbot` and `review channel ready`, or says exactly what is wrong (a refused token, or a channel the bot can't post in). Telegram is polled over HTTPS: no public URL or webhook is needed.
@@ -183,6 +183,7 @@ Everything deployment-specific lives in `config.yml`, which is gitignored. [`con
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | Token from @BotFather. |
 | `TG_REVIEW_CHANNEL_ID` | yes | The private evidence channel, starting with `-100`. |
+| `TG_GROUP_IDS` | no | Community group(s) where members post submissions in the group itself: IDs starting with `-100`, separated by commas. Without it the bot works in private chats only. |
 | `CAMPAIGN_END_UTC` | no | When submissions close, as UTC with a `Z`: `2026-11-22T23:59:59Z`. See [Closing the campaign](#closing-the-campaign). |
 | `TELEGRAM_API_ROOT` | no | Only for a self-hosted Bot API server, for example `http://localhost:8081`. |
 | `GOOGLE_SHEET_ID` | yes | Spreadsheet ID or URL. |

@@ -78,6 +78,7 @@ async function main(): Promise<void> {
     matcher: new QuestMatcher(config.quests, config.fuzzyThreshold),
     writer,
     campaignEnd,
+    groupIds: telegramEnv.groupIds,
     log: log.child('telegram'),
     // The token was refused while running: restarting cannot help, but the host will show the crash.
     onFatal: () => shutdown('Telegram refused the bot token', 1),

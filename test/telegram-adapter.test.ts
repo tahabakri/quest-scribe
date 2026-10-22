@@ -76,7 +76,7 @@ let adapter: TelegramAdapter | undefined;
 let recorded: WalEntry[];
 let logs: ReturnType<typeof memoryLogger>;
 
-function create(overrides: { token?: string; retryDelayMs?: number; onFatal?: () => void } = {}): TelegramAdapter {
+function create(overrides: { token?: string; retryDelayMs?: number; onFatal?: () => void; groupIds?: number[] } = {}): TelegramAdapter {
   recorded = [];
   logs = memoryLogger();
   const known = new Set<string>();
@@ -100,6 +100,7 @@ function create(overrides: { token?: string; retryDelayMs?: number; onFatal?: ()
     transientRetryDelaysMs: [5, 10],
     albumWaitMs: 120,
     onFatal: overrides.onFatal,
+    groupIds: overrides.groupIds,
   });
   return adapter;
 }
@@ -206,6 +207,17 @@ describe('TelegramAdapter against a fake Bot API', () => {
 
     expect(fake.sent).toHaveLength(1); // only the sentinel
     expect(recorded).toHaveLength(0);
+  });
+
+  it('logs a photo posted in the community group and replies to that very message', async () => {
+    await create({ groupIds: [-100777] }).start();
+    const group = { id: -100777, type: 'supergroup', title: 'Global' };
+    const post = base(group, { caption: 'share post', photo: [{ file_id: 'gp', file_unique_id: 'gp', width: 800, height: 800 }] });
+    fake.push(post);
+    await waitFor(() => fake.sent.length >= 1, 'the reply in the group');
+    expect(submissions()[0]).toMatchObject({ channel_name: 'telegram_group', quest_type: 'share_post', uid: '', bound: false });
+    const call = fake.callsOf('sendMessage')[0]!.payload;
+    expect(call).toMatchObject({ chat_id: -100777, reply_parameters: { message_id: (post as { message_id: number }).message_id } });
   });
 
   it('never acts on an edited message', async () => {

@@ -66,14 +66,24 @@ describe('readTelegramEnv', () => {
     expect(readTelegramEnv({ TELEGRAM_BOT_TOKEN: ` ${TOKEN} `, TG_REVIEW_CHANNEL_ID: '-1001234567890' })).toEqual({
       token: TOKEN,
       reviewChannelId: '-1001234567890',
+      groupIds: [],
     });
   });
 
   it('reads an optional API root for a self-hosted Bot API server, and rejects a malformed one', () => {
     const env = { TELEGRAM_BOT_TOKEN: TOKEN, TG_REVIEW_CHANNEL_ID: '-1001234567890' };
     expect(readTelegramEnv({ ...env, TELEGRAM_API_ROOT: ' http://localhost:8081 ' })?.apiRoot).toBe('http://localhost:8081');
-    expect(readTelegramEnv({ ...env, TELEGRAM_API_ROOT: '' })).toEqual({ token: TOKEN, reviewChannelId: '-1001234567890' });
+    expect(readTelegramEnv({ ...env, TELEGRAM_API_ROOT: '' })).toEqual({ token: TOKEN, reviewChannelId: '-1001234567890', groupIds: [] });
     expect(() => readTelegramEnv({ ...env, TELEGRAM_API_ROOT: 'localhost:8081' })).toThrow(/TELEGRAM_API_ROOT must be a URL/);
+  });
+
+  it('reads the community group IDs, one or several, and rejects anything that is not a group ID', () => {
+    const env = { TELEGRAM_BOT_TOKEN: TOKEN, TG_REVIEW_CHANNEL_ID: '-1001234567890' };
+    expect(readTelegramEnv({ ...env, TG_GROUP_IDS: ' -1001111111111 , -1002222222222 ' }).groupIds).toEqual([-1001111111111, -1002222222222]);
+    expect(readTelegramEnv({ ...env, TG_GROUP_IDS: '' }).groupIds).toEqual([]);
+    for (const bad of ['@mygroup', '12345', '-123456', '-1001111111111,abc']) {
+      expect(() => readTelegramEnv({ ...env, TG_GROUP_IDS: bad })).toThrow(/TG_GROUP_IDS must list group IDs/);
+    }
   });
 
   it('rejects a token that is not one, without echoing it', () => {

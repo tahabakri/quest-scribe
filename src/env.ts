@@ -85,6 +85,8 @@ export interface TelegramEnv {
   reviewChannelId: string;
   /** Only for a self-hosted Bot API server, or for tests: where the Bot API lives. */
   apiRoot?: string;
+  /** The community group(s) where members post submissions in the group itself (each starts with -100). */
+  groupIds: number[];
 }
 
 /**
@@ -104,7 +106,17 @@ export function readTelegramEnv(env: NodeJS.ProcessEnv = process.env): TelegramE
   if (apiRoot !== undefined && apiRoot !== '' && !/^https?:\/\/\S+$/.test(apiRoot)) {
     throw new ConfigError('TELEGRAM_API_ROOT must be a URL such as http://localhost:8081 (leave it unset for the normal Telegram service).');
   }
-  return apiRoot ? { token, reviewChannelId, apiRoot } : { token, reviewChannelId };
+  const groupIds = (env.TG_GROUP_IDS ?? '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => id !== '')
+    .map((id) => {
+      if (!/^-100\d{5,}$/.test(id)) {
+        throw new ConfigError('TG_GROUP_IDS must list group IDs starting with -100, separated by commas, for example -1001234567890.');
+      }
+      return Number(id);
+    });
+  return apiRoot ? { token, reviewChannelId, groupIds, apiRoot } : { token, reviewChannelId, groupIds };
 }
 
 /**

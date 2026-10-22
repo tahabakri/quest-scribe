@@ -24,6 +24,8 @@ export interface TelegramAdapterOptions {
   matcher: QuestMatcher;
   writer: Pick<SheetWriter, 'record' | 'has'>;
   campaignEnd?: Date | undefined;
+  /** Groups whose members may post submissions in the group itself. Every other group is ignored. */
+  groupIds?: readonly number[] | undefined;
   log: Logger;
   /** Called if Telegram stops for good (the token was refused while running). */
   onFatal?: () => void;
@@ -60,8 +62,10 @@ export class TelegramAdapter {
     const again = <T>(call: () => Promise<T>): Promise<T> => withTransientRetries(call, retryDelays, this.abort.signal);
 
     const api: TelegramApiPort = {
-      sendMessage: async (chatId, text) => {
-        await again(() => this.bot.api.sendMessage(chatId, text));
+      sendMessage: async (chatId, text, replyTo) => {
+        await again(() =>
+          this.bot.api.sendMessage(chatId, text, replyTo === undefined ? {} : { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } }),
+        );
       },
       copyToReview: async ({ fromChatId, messageId, caption }) =>
         (await again(() => this.bot.api.copyMessage(options.reviewChannelId, fromChatId, messageId, { caption }))).message_id,
@@ -76,6 +80,7 @@ export class TelegramAdapter {
       api,
       reviewChannelId: options.reviewChannelId,
       campaignEnd: options.campaignEnd,
+      groupIds: options.groupIds,
       log: options.log,
       albumWaitMs: options.albumWaitMs,
     });

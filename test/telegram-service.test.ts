@@ -59,6 +59,7 @@ function memoryLogger() {
 
 interface Options {
   end?: Date;
+  groups?: number[];
   record?: (entry: WalEntry) => boolean;
   copy?: (args: { fromChatId: number; messageId: number; caption: string }) => Promise<number>;
   copyMore?: (args: { fromChatId: number; messageIds: number[] }) => Promise<void>;
@@ -67,16 +68,16 @@ interface Options {
 }
 
 function setup(options: Options = {}) {
-  const sent: { chatId: number; text: string }[] = [];
+  const sent: { chatId: number; text: string; replyTo?: number }[] = [];
   const copies: { fromChatId: number; messageId: number; caption: string }[] = [];
   const more: { fromChatId: number; messageIds: number[] }[] = [];
   const recorded: WalEntry[] = [];
   const known = new Set<string>();
   let reviewId = 700;
   const api: TelegramApiPort = {
-    sendMessage: async (chatId, text) => {
+    sendMessage: async (chatId, text, replyTo) => {
       if (options.send) await options.send(chatId, text);
-      sent.push({ chatId, text });
+      sent.push(replyTo === undefined ? { chatId, text } : { chatId, text, replyTo });
     },
     copyToReview: async (args) => {
       copies.push(args);
@@ -104,6 +105,7 @@ function setup(options: Options = {}) {
     api,
     reviewChannelId: REVIEW_CHANNEL,
     campaignEnd: options.end,
+    groupIds: options.groups,
     log,
     albumWaitMs: 1000,
   });
@@ -194,6 +196,71 @@ describe('no binding on Telegram', () => {
     }
     expect(t.replies().join(' ')).not.toMatch(/bind/i);
     expect(t.copies.every((c) => !c.caption.includes('UID'))).toBe(true);
+  });
+});
+
+describe('posting in the community group', () => {
+  const GROUP = -100555;
+  const inGroup = (overrides: Partial<TgMessage> = {}): Partial<TgMessage> => ({ chatId: GROUP, chatType: 'supergroup', ...overrides });
+
+  it('logs a photo posted in the group, as a group submission, and replies to that message', async () => {
+    const t = setup({ groups: [GROUP] });
+    const m = photo('share post', inGroup());
+    await t.service.handle(m);
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'share_post', channel_name: 'telegram_group', uid: '', bound: false, platform: 'telegram' });
+    expect(t.sent).toEqual([{ chatId: GROUP, text: 'Done: Share Post. Cheers!', replyTo: m.messageId }]);
+    expect(t.copies[0]).toMatchObject({ fromChatId: GROUP, messageId: m.messageId });
+  });
+
+  it('is silent on ordinary chat, commands and links on their own', async () => {
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(text('good morning everyone', inGroup()));
+    await t.service.handle(text('check this https://example.com/x', inGroup()));
+    await t.service.handle(command('help', '', inGroup()));
+    await t.service.handle(command('start', '', inGroup()));
+    expect(t.sent).toHaveLength(0);
+    expect(t.recorded).toHaveLength(0);
+  });
+
+  it('reminds a member who names a quest without a photo, replying to them', async () => {
+    const t = setup({ groups: [GROUP] });
+    const m = text('I did the share post', inGroup());
+    await t.service.handle(m);
+    expect(t.sent).toEqual([{ chatId: GROUP, text: 'Attach a screenshot.', replyTo: m.messageId }]);
+  });
+
+  it('ignores every other group, and channels', async () => {
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(photo('share post', { chatId: -100999, chatType: 'supergroup' }));
+    await t.service.handle(photo('share post', { chatId: GROUP, chatType: 'channel' }));
+    expect(t.recorded).toHaveLength(0);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('ignores groups entirely when none is configured', async () => {
+    const t = setup();
+    await t.service.handle(photo('share post', inGroup()));
+    expect(t.recorded).toHaveLength(0);
+  });
+
+  it('gathers an album posted in the group into one row and one reply', async () => {
+    vi.useFakeTimers();
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(photo('boost post', inGroup({ messageId: 5001, mediaGroupId: 'ga' })));
+    await t.service.handle(photo(undefined, inGroup({ messageId: 5002, mediaGroupId: 'ga' })));
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.sent).toEqual([{ chatId: GROUP, text: 'Done: Boost Post. Cheers!', replyTo: 5001 }]);
+  });
+
+  it('answers with the ended message after the campaign, only to submissions', async () => {
+    const t = setup({ groups: [GROUP], end: new Date('2026-11-22T23:59:59Z') });
+    const late = new Date('2026-11-23T00:00:00Z');
+    await t.service.handle(photo('share post', inGroup({ date: late })));
+    await t.service.handle(text('hello', inGroup({ date: late })));
+    expect(t.sent.map((s) => s.text)).toEqual(['Season over.']);
+    expect(t.recorded).toHaveLength(0);
   });
 });
 

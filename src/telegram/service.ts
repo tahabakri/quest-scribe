@@ -10,8 +10,10 @@ import { AlbumCollector } from './albums.js';
 import { firstLinkIn } from './parse.js';
 import type { TelegramApiPort, TgMessage } from './types.js';
 
-/** What the sheet's channel_name column says for every Telegram submission: it all happens in direct messages. */
+/** What the sheet's channel_name column says for a submission sent to the bot in a private chat... */
 export const TELEGRAM_CHANNEL_NAME = 'telegram_dm';
+/** ...and for one posted in the community group. */
+export const TELEGRAM_GROUP_CHANNEL_NAME = 'telegram_group';
 
 const CAPTION_LIMIT = 1024;
 
@@ -24,6 +26,8 @@ export interface TelegramServiceDeps {
   reviewChannelId: string;
   /** After this moment submissions are answered, not logged. */
   campaignEnd?: Date | undefined;
+  /** Groups where submissions are posted in the group itself. Any other group is ignored. */
+  groupIds?: readonly number[] | undefined;
   log: Logger;
   /** How long to wait for the rest of an album. */
   albumWaitMs?: number;
@@ -34,16 +38,20 @@ export interface TelegramServiceDeps {
  * only through `api`, so it can be tested without the network, and never throws:
  * a bad message is logged and answered, it cannot stop the bot.
  *
- * Everything happens in direct messages; a group is ignored. There is no /bind
+ * Members submit in a private chat with the bot, or in the community group(s) named in
+ * `groupIds`, where the bot reacts only to photos (and to a quest name without a photo) and
+ * stays silent on ordinary chat. Any other group is ignored. There is no /bind
  * here: members link their account ID once in the separate campaign bot, which this
  * bot cannot see, so every row it writes has uid blank and bound = FALSE.
  */
 export class TelegramService {
   private readonly albums: AlbumCollector;
   private readonly helpText: string;
+  private readonly groups: ReadonlySet<number>;
 
   constructor(private readonly deps: TelegramServiceDeps) {
     const { config } = deps;
+    this.groups = new Set(deps.groupIds ?? []);
     this.helpText = buildHelpText(config.telegram.welcome, config.telegram.helpQuestsHeading, config.quests);
     this.albums = new AlbumCollector(
       (parts) => this.safely(parts[0]?.chatId, () => this.submitImages(parts)),
@@ -64,7 +72,7 @@ export class TelegramService {
     if (message.fromIsBot || message.fromId === undefined) return;
     const { telegram } = this.deps.config;
 
-    if (message.chatType !== 'private') return;
+    if (message.chatType !== 'private') return this.groupMessage(message);
 
     const command = message.command;
     // Once the campaign is over nobody is invited to submit: the instructions would only lead to "ended".
@@ -77,6 +85,24 @@ export class TelegramService {
       return;
     }
     return this.textMessage(message);
+  }
+
+  /**
+   * A message in the community group. Only the configured group counts, and the bot is quiet
+   * unless the member is clearly submitting: a photo, or a quest name without a photo. Chat,
+   * commands and links on their own are left alone, so the group stays readable.
+   */
+  private async groupMessage(message: TgMessage): Promise<void> {
+    if (message.chatType === 'channel' || !this.groups.has(message.chatId)) return;
+    if (message.images.length > 0) {
+      if (message.mediaGroupId === undefined) await this.submitImages([message]);
+      else if (this.albums.add(message) === 'late') await this.copyLatePart(message);
+      return;
+    }
+    const text = message.text ?? '';
+    if (message.command !== undefined || this.deps.matcher.match(text).kind === 'none') return;
+    if (this.ended(message)) return this.say(message.chatId, this.deps.config.replies.ended, message.messageId);
+    await this.say(message.chatId, this.deps.config.telegram.replies.noImage, message.messageId);
   }
 
   /** A message with no image: a link is a content submission, a quest name alone is a reminder, anything else gets help. */
@@ -109,7 +135,7 @@ export class TelegramService {
         createdAt: message.date,
         authorId: String(message.fromId),
         authorUsername: message.username,
-        channelName: TELEGRAM_CHANNEL_NAME,
+        channelName: channelNameOf(message),
         content: text,
         url: messageLink,
       },
@@ -141,7 +167,8 @@ export class TelegramService {
     const captioned = parts.find((p) => (p.caption ?? '').trim() !== '');
     const caption = captioned?.caption ?? '';
 
-    if (this.ended(first)) return this.say(first.chatId, config.replies.ended);
+    const replyTo = first.chatType === 'private' ? undefined : first.messageId;
+    if (this.ended(first)) return this.say(first.chatId, config.replies.ended, replyTo);
 
     const outcome = classifyImageMessage({ text: caption, hasImage: true }, matcher);
     if (outcome.action !== 'log') return;
@@ -160,7 +187,7 @@ export class TelegramService {
         createdAt: first.date,
         authorId: String(first.fromId),
         authorUsername: first.username,
-        channelName: TELEGRAM_CHANNEL_NAME,
+        channelName: channelNameOf(first),
         content: caption,
         url: messageLink,
       },
@@ -173,7 +200,7 @@ export class TelegramService {
         ...(captioned ? { linkUrl: firstLinkIn(caption, captioned.entities) ?? '' } : {}),
       },
     );
-    if (!this.record(first.chatId, id, row)) return await this.say(first.chatId, config.telegram.replies.error);
+    if (!this.record(first.chatId, id, row)) return await this.say(first.chatId, config.telegram.replies.error, replyTo);
 
     const { replies } = config.telegram;
     const text =
@@ -182,7 +209,7 @@ export class TelegramService {
         : outcome.reaction === 'success'
           ? replies.logged.replaceAll('{quest}', questNameFor(config.quests, outcome.questType))
           : replies.unmatched;
-    await this.say(first.chatId, text);
+    await this.say(first.chatId, text, replyTo);
   }
 
   /**
@@ -244,9 +271,9 @@ export class TelegramService {
     return hasEnded(this.deps.campaignEnd, message.date);
   }
 
-  private async say(chatId: number, text: string): Promise<void> {
+  private async say(chatId: number, text: string, replyTo?: number): Promise<void> {
     try {
-      await this.deps.api.sendMessage(chatId, text);
+      await this.deps.api.sendMessage(chatId, text, replyTo);
     } catch (err) {
       // For example the member blocked the bot. The row, if any, is already saved.
       this.deps.log.warn('could not send a reply', { chat: chatId, err });
@@ -261,6 +288,10 @@ export class TelegramService {
       if (chatId !== undefined) await this.say(chatId, this.deps.config.telegram.replies.error);
     }
   }
+}
+
+function channelNameOf(message: TgMessage): string {
+  return message.chatType === 'private' ? TELEGRAM_CHANNEL_NAME : TELEGRAM_GROUP_CHANNEL_NAME;
 }
 
 /** t.me/c/<channel>/<message>: a private channel's ID minus its -100 prefix. */

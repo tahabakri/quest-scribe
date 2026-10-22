@@ -42,7 +42,8 @@ export interface TgMessage {
 
 /** What the service needs from Telegram. grammY implements it in adapter.ts; tests fake it. */
 export interface TelegramApiPort {
-  sendMessage(chatId: number, text: string): Promise<void>;
+  /** `replyTo` makes the message a reply to that message (used in groups, so it is clear who it is for). */
+  sendMessage(chatId: number, text: string, replyTo?: number): Promise<void>;
   /** Copies a message into the review channel, with a new caption. Returns the copy's message id. */
   copyToReview(args: { fromChatId: number; messageId: number; caption: string }): Promise<number>;
   /** Copies further messages (the rest of an album) into the review channel, keeping their captions. */
