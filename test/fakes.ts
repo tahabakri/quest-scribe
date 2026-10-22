@@ -1,5 +1,5 @@
 import { type SheetsGateway, type TabSpec, compareHeaders } from '../src/sheets/gateway.js';
-import type { BindRow, Cell, SubmissionRow } from '../src/sheets/schema.js';
+import type { Cell, SubmissionRow } from '../src/sheets/schema.js';
 import type { WalEntry } from '../src/wal.js';
 
 type Op = 'prepareTabs' | 'checkHeaders' | 'appendRows' | 'readRows' | 'readColumn' | 'updateRows';
@@ -142,23 +142,6 @@ export function submission(overrides: Partial<SubmissionRow> = {}): WalEntry {
       link_url: '',
       message_link: `https://discord.com/channels/1/2/${messageId}`,
       date_utc: '2026-01-15',
-      platform: 'discord',
-      ...overrides,
-    },
-  };
-}
-
-export function bind(overrides: Partial<BindRow> = {}, id = `bind:${++sequence}`): WalEntry {
-  return {
-    id,
-    kind: 'bind',
-    row: {
-      timestamp_utc: '2026-01-15T09:00:00Z',
-      user_id: '100000000000000001',
-      username: 'member_one',
-      uid: '123456',
-      duplicate_uid: false,
-      last_updated_utc: '2026-01-15T09:00:00Z',
       platform: 'discord',
       ...overrides,
     },

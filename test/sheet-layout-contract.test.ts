@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { BIND_HEADERS, SUBMISSION_HEADERS, parsePlatform } from '../src/sheets/schema.js';
+import { SUBMISSION_HEADERS, parsePlatform } from '../src/sheets/schema.js';
 
-// The Discord bot (quest-ledger) and the Telegram bot (quest-scribe) can write the SAME Google
-// Sheet, and each insists that row 1 matches its layout exactly. If this file has to change,
+// The Discord bot (quest-ledger) and this Telegram bot (quest-scribe) write the SAME Submissions
+// tab, and each insists that row 1 matches its layout exactly. If this file has to change,
 // change the same test in the sibling repository in the same release, and deploy the Discord
 // bot first: a bot still on the old layout stops writing as soon as the headers change.
-describe('sheet layout shared with the sibling bot', () => {
-  it('Submissions columns', () => {
+//
+// The Binds tab belongs to the Discord bot alone. This bot never reads or writes it.
+describe('Submissions layout shared with the Discord bot', () => {
+  it('columns', () => {
     expect([...SUBMISSION_HEADERS]).toEqual([
       'timestamp_utc',
       'user_id',
@@ -21,18 +23,6 @@ describe('sheet layout shared with the sibling bot', () => {
       'link_url',
       'message_link',
       'date_utc',
-      'platform',
-    ]);
-  });
-
-  it('Binds columns', () => {
-    expect([...BIND_HEADERS]).toEqual([
-      'timestamp_utc',
-      'user_id',
-      'username',
-      'uid',
-      'duplicate_uid',
-      'last_updated_utc',
       'platform',
     ]);
   });

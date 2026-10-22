@@ -23,16 +23,6 @@ export const SUBMISSION_HEADERS = [
   'platform',
 ] as const;
 
-export const BIND_HEADERS = [
-  'timestamp_utc',
-  'user_id',
-  'username',
-  'uid',
-  'duplicate_uid',
-  'last_updated_utc',
-  'platform',
-] as const;
-
 // Before Telegram was added the two identity columns carried a Discord prefix and
 // there was no platform column.
 const LEGACY_NAMES: Record<string, string> = { user_id: 'discord_user_id', username: 'discord_username' };
@@ -48,8 +38,6 @@ export const SUBMISSION_UPGRADE_FROM: readonly (readonly string[])[] = [
   legacyOf(SUBMISSION_HEADERS), // Discord-only names, no platform column
   SUBMISSION_HEADERS.slice(0, -1), // identity columns already renamed, no platform column yet
 ];
-export const BIND_UPGRADE_FROM: readonly (readonly string[])[] = [legacyOf(BIND_HEADERS), BIND_HEADERS.slice(0, -1)];
-
 export interface SubmissionRow {
   timestamp_utc: string;
   user_id: string;
@@ -67,17 +55,6 @@ export interface SubmissionRow {
   platform: Platform;
 }
 
-export interface BindRow {
-  /** When this user first bound. Preserved when they re-bind. */
-  timestamp_utc: string;
-  user_id: string;
-  username: string;
-  uid: string;
-  duplicate_uid: boolean;
-  last_updated_utc: string;
-  platform: Platform;
-}
-
 /** Cells are written RAW: strings stay text (no formula injection), booleans become TRUE/FALSE. */
 export type Cell = string | boolean;
 
@@ -86,15 +63,6 @@ export const MESSAGE_LINK_COLUMN = SUBMISSION_HEADERS.indexOf('message_link');
 
 export function submissionCells(row: SubmissionRow): Cell[] {
   return SUBMISSION_HEADERS.map((header) => row[header]);
-}
-
-export function bindCells(row: BindRow): Cell[] {
-  return BIND_HEADERS.map((header) => row[header]);
-}
-
-/** The same user ID can exist on two platforms, so identity is always platform plus ID. */
-export function bindKey(platform: Platform, userId: string): string {
-  return `${platform}:${userId}`;
 }
 
 /** Blank means Discord: rows written before the platform column existed are all Discord. */
@@ -120,36 +88,7 @@ export function normalizeLegacyRow<T extends object>(row: T): T {
   return record as T;
 }
 
-/** Parses a Binds data row read back from the sheet. Returns undefined for blank or malformed rows. */
-export function parseBindRow(cells: readonly string[]): BindRow | undefined {
-  const [timestamp = '', userId = '', username = '', uid = '', duplicate = '', lastUpdated = '', platformCell] = cells.map(
-    (c) => c.trim(),
-  );
-  const platform = parsePlatform(platformCell);
-  if (!/^\d{1,20}$/.test(userId) || uid === '' || platform === undefined) return undefined;
-  return {
-    timestamp_utc: timestamp,
-    user_id: userId,
-    username,
-    uid,
-    duplicate_uid: duplicate.toUpperCase() === 'TRUE',
-    last_updated_utc: lastUpdated,
-    platform,
-  };
-}
-
 /** ISO 8601 UTC to the second, e.g. 2026-10-06T14:22:31Z. */
 export function isoSeconds(date: Date): string {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
-}
-
-const ISO_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-
-/**
- * True when a bind stamped `candidate` predates one stamped `current`, so it must
- * not replace it (e.g. an old bind replayed from the log). Timestamps in this
- * fixed format compare correctly as strings; anything else never counts as older.
- */
-export function isOlderBind(candidate: string, current: string): boolean {
-  return ISO_SECONDS.test(candidate) && ISO_SECONDS.test(current) && candidate < current;
 }

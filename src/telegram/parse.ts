@@ -2,7 +2,7 @@ import { extractFirstLink } from '../submissions.js';
 import type { TgCommand, TgEntity } from './types.js';
 
 /**
- * "/bind 123456", "/bind@MyBot 123456", "/start quests". Undefined for ordinary
+ * "/start quests", "/help@MyBot". Undefined for ordinary
  * text, and for a command addressed to a different bot (in a group several bots
  * can share a command name).
  */

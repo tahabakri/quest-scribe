@@ -1,9 +1,9 @@
 import { extname } from 'node:path';
 import { UNMATCHED_QUEST_TYPE } from './config.js';
 import type { QuestMatcher } from './matcher.js';
-import { type BindRow, type Platform, type SubmissionRow, isoSeconds } from './sheets/schema.js';
+import { type Platform, type SubmissionRow, isoSeconds } from './sheets/schema.js';
 
-export type WarningKey = 'unmatched' | 'noImage' | 'unbound';
+export type WarningKey = 'unmatched' | 'noImage';
 
 /** What to do with one message. */
 export type Outcome =
@@ -22,24 +22,23 @@ export type Outcome =
  * | no    | matches (or typo)  | not logged, attention + warn             |
  * | no    | matches nothing    | ignored (ordinary chat)                  |
  *
- * An unbound member is still logged (bound = FALSE) and reminded to /bind.
- * All warnings for one message go out as one reply.
+ * Whether the member linked an account ID is not this function's business: this bot
+ * cannot see that, and every row it writes says bound = FALSE.
  */
 export function classifyImageMessage(
-  input: { text: string; hasImage: boolean; bound: boolean },
+  input: { text: string; hasImage: boolean },
   matcher: QuestMatcher,
 ): Outcome {
   const match = matcher.match(input.text);
-  const unbound: WarningKey[] = input.bound ? [] : ['unbound'];
   if (!input.hasImage) {
-    return match.kind === 'none' ? { action: 'ignore' } : { action: 'warn', reaction: 'attention', warnings: ['noImage', ...unbound] };
+    return match.kind === 'none' ? { action: 'ignore' } : { action: 'warn', reaction: 'attention', warnings: ['noImage'] };
   }
   if (match.kind === 'none') {
-    return { action: 'log', questType: UNMATCHED_QUEST_TYPE, fuzzy: false, reaction: 'attention', warnings: ['unmatched', ...unbound] };
+    return { action: 'log', questType: UNMATCHED_QUEST_TYPE, fuzzy: false, reaction: 'attention', warnings: ['unmatched'] };
   }
   // Typo matches and close variants are flagged (fuzzy_match = TRUE) for a manual look.
   const flagged = match.kind === 'fuzzy' || match.review === true;
-  return { action: 'log', questType: match.type, fuzzy: flagged, reaction: 'success', warnings: unbound };
+  return { action: 'log', questType: match.type, fuzzy: flagged, reaction: 'success', warnings: [] };
 }
 
 export interface AttachmentInfo {
@@ -114,7 +113,6 @@ export function buildSubmissionRow(
     questType: string;
     fuzzy: boolean;
     attachmentUrl: string;
-    bind: BindRow | undefined;
     /** The link to record, when the platform knows better than the text does (a link hidden behind words). */
     linkUrl?: string;
   },
@@ -124,8 +122,9 @@ export function buildSubmissionRow(
     timestamp_utc: timestamp,
     user_id: source.authorId,
     username: source.authorUsername,
-    uid: details.bind?.uid ?? '',
-    bound: details.bind !== undefined,
+    // The account ID is linked in a different bot, which this one cannot see: blank, and FALSE only means "not checked here".
+    uid: '',
+    bound: false,
     quest_type: details.questType,
     fuzzy_match: details.fuzzy,
     channel_name: source.channelName,

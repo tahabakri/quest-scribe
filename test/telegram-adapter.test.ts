@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { BindStore } from '../src/binds.js';
 import { parseConfig } from '../src/config.js';
 import type { Logger } from '../src/logger.js';
 import { QuestMatcher } from '../src/matcher.js';
@@ -23,24 +22,15 @@ quests:
   - keyword: boost post
     type: boost_post
     name: Boost Post
-bind:
-  command_description: Link your account
-  id_label: uid
-  id_description: Your account ID
-  replies: { success: "Linked!", invalid: "Invalid ID.", error: "Bind failed." }
-replies: { unmatched: a, no_image: b, unbound: c, ended: "Season over." }
+replies: { ended: "Season over." }
 telegram:
   welcome: "Welcome!"
   link_quest_type: ugc
   replies:
-    bind_usage: "Usage: /bind 123456789"
-    bind_invalid: "Not a valid ID."
-    group_bind: "Message me privately."
     logged: "Done: {quest}. Cheers!"
     unmatched: "No match. Saved."
     no_caption: "Saved. Add a caption."
     no_image: "Attach a screenshot."
-    unbound: "Run /bind first."
     ugc_logged: "Logged your link."
     error: "Something broke."
 `,
@@ -84,12 +74,10 @@ let fake: FakeTelegram;
 let apiRoot: string;
 let adapter: TelegramAdapter | undefined;
 let recorded: WalEntry[];
-let binds: BindStore;
 let logs: ReturnType<typeof memoryLogger>;
 
 function create(overrides: { token?: string; retryDelayMs?: number; onFatal?: () => void } = {}): TelegramAdapter {
   recorded = [];
-  binds = new BindStore();
   logs = memoryLogger();
   const known = new Set<string>();
   adapter = new TelegramAdapter({
@@ -97,7 +85,6 @@ function create(overrides: { token?: string; retryDelayMs?: number; onFatal?: ()
     reviewChannelId: REVIEW,
     config,
     matcher: new QuestMatcher(config.quests, config.fuzzyThreshold),
-    binds,
     writer: {
       has: (id) => known.has(id),
       record: (entry) => {
@@ -138,7 +125,6 @@ describe('TelegramAdapter against a fake Bot API', () => {
     expect(fake.callsOf('getChatMember')[0]!.payload).toMatchObject({ chat_id: REVIEW, user_id: 424242 });
     expect(fake.callsOf('setMyCommands')[0]!.payload.commands).toEqual([
       expect.objectContaining({ command: 'start' }),
-      expect.objectContaining({ command: 'bind' }),
       expect.objectContaining({ command: 'help' }),
     ]);
     await waitFor(() => fake.callsOf('getUpdates').length > 0, 'polling to start');
@@ -146,18 +132,16 @@ describe('TelegramAdapter against a fake Bot API', () => {
     expect(logs.lines.some((l) => l.text === 'review channel ready: Review Channel')).toBe(true);
   });
 
-  it('runs the whole journey: /start, /bind, a screenshot, a link, and chat', async () => {
+  it('runs the whole journey: /start, a screenshot, a link, and chat', async () => {
     await create().start();
     fake.push(command('start', 'quests'));
-    fake.push(command('bind', '766000123'));
     fake.push(photo('Share Post ✅'));
     fake.push(dm({ text: 'my write-up https://example.com/post/1' }));
     fake.push(dm({ text: 'hello there' }));
-    await waitFor(() => fake.sent.length >= 5, 'five replies');
+    await waitFor(() => fake.sent.length >= 4, 'four replies');
 
     expect(fake.sent.map((s) => s.text)).toEqual([
       'Welcome!',
-      'Linked!',
       'Done: Share Post. Cheers!',
       'Logged your link.',
       expect.stringContaining('Quest names') as unknown as string,
@@ -168,8 +152,8 @@ describe('TelegramAdapter against a fake Bot API', () => {
     expect(shot).toMatchObject({
       user_id: String(USER),
       username: '@sam_q',
-      uid: '766000123',
-      bound: true,
+      uid: '',
+      bound: false,
       quest_type: 'share_post',
       fuzzy_match: false,
       channel_name: 'telegram_dm',
@@ -183,8 +167,7 @@ describe('TelegramAdapter against a fake Bot API', () => {
 
     const copy = fake.callsOf('copyMessage')[0]!.payload;
     expect(copy).toMatchObject({ chat_id: REVIEW, from_chat_id: USER });
-    expect(copy.caption).toContain(`User ${USER} @sam_q | UID 766000123 | share_post`);
-    expect(recorded.find((e) => e.kind === 'bind')!.row).toMatchObject({ platform: 'telegram', uid: '766000123', user_id: String(USER) });
+    expect(copy.caption).toContain(`User ${USER} @sam_q | share_post`);
   });
 
   it('turns an album into one row, copies every photo, and replies once', async () => {
@@ -211,7 +194,7 @@ describe('TelegramAdapter against a fake Bot API', () => {
     expect(submissions()[0]).toMatchObject({ attachment_url: 'doc-1', quest_type: 'share_post' });
   });
 
-  it('answers /bind in a group once, and ignores everything else there and from bots and channels', async () => {
+  it('ignores everything in groups, and from bots and channels', async () => {
     await create().start();
     const group = { id: -100777, type: 'supergroup', title: 'Global' };
     fake.push(base(group, { text: '/bind 123456', entities: [{ type: 'bot_command', offset: 0, length: 5 }] }));
@@ -221,10 +204,8 @@ describe('TelegramAdapter against a fake Bot API', () => {
     fake.push(command('help')); // a sentinel: once it is answered, everything before it was handled
     await waitFor(() => fake.sent.some((s) => s.text.includes('Quest names')), 'the sentinel reply');
 
-    expect(fake.sent[0]).toEqual({ chatId: -100777, text: 'Message me privately.' });
-    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent).toHaveLength(1); // only the sentinel
     expect(recorded).toHaveLength(0);
-    expect(binds.size).toBe(0);
   });
 
   it('never acts on an edited message', async () => {

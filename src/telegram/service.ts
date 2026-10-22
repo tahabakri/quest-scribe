@@ -1,10 +1,9 @@
 import { hasEnded } from '../campaign.js';
-import { type BindStore, normalizeBindId } from '../binds.js';
 import type { AppConfig } from '../config.js';
 import { type Logger } from '../logger.js';
 import type { QuestMatcher } from '../matcher.js';
 import { buildHelpText, questNameFor } from '../quests.js';
-import type { BindRow, SubmissionRow } from '../sheets/schema.js';
+import type { SubmissionRow } from '../sheets/schema.js';
 import { buildSubmissionRow, classifyImageMessage } from '../submissions.js';
 import type { SheetWriter } from '../writer.js';
 import { AlbumCollector } from './albums.js';
@@ -17,9 +16,8 @@ export const TELEGRAM_CHANNEL_NAME = 'telegram_dm';
 const CAPTION_LIMIT = 1024;
 
 export interface TelegramServiceDeps {
-  config: Pick<AppConfig, 'quests' | 'bind' | 'replies' | 'telegram'>;
+  config: Pick<AppConfig, 'quests' | 'replies' | 'telegram'>;
   matcher: QuestMatcher;
-  binds: BindStore;
   writer: Pick<SheetWriter, 'record' | 'has'>;
   api: TelegramApiPort;
   /** The private channel's ID as Telegram gives it: -100 followed by digits. */
@@ -36,8 +34,9 @@ export interface TelegramServiceDeps {
  * only through `api`, so it can be tested without the network, and never throws:
  * a bad message is logged and answered, it cannot stop the bot.
  *
- * Everything happens in direct messages. A group is ignored, except that /bind
- * there is answered once with "message me privately".
+ * Everything happens in direct messages; a group is ignored. There is no /bind
+ * here: members link their account ID once in the separate campaign bot, which this
+ * bot cannot see, so every row it writes has uid blank and bound = FALSE.
  */
 export class TelegramService {
   private readonly albums: AlbumCollector;
@@ -65,13 +64,9 @@ export class TelegramService {
     if (message.fromIsBot || message.fromId === undefined) return;
     const { telegram } = this.deps.config;
 
-    if (message.chatType !== 'private') {
-      if (message.command?.name === 'bind') await this.say(message.chatId, telegram.replies.groupBind);
-      return;
-    }
+    if (message.chatType !== 'private') return;
 
     const command = message.command;
-    if (command?.name === 'bind') return this.bind(message, command.args);
     // Once the campaign is over nobody is invited to submit: the instructions would only lead to "ended".
     if (command?.name === 'start') return this.say(message.chatId, this.ended(message) ? this.deps.config.replies.ended : telegram.welcome);
     if (command?.name === 'help') return this.say(message.chatId, this.ended(message) ? this.deps.config.replies.ended : this.helpText);
@@ -84,48 +79,22 @@ export class TelegramService {
     return this.textMessage(message);
   }
 
-  private async bind(message: TgMessage, args: string): Promise<void> {
-    const { config, binds, writer, log } = this.deps;
-    const userId = String(message.fromId);
-    if (args === '') return this.say(message.chatId, config.telegram.replies.bindUsage);
-
-    const id = normalizeBindId(args);
-    if (!config.bind.idPattern.test(id)) {
-      log.info('bind rejected: invalid ID', { platform: 'telegram', user: userId });
-      return this.say(message.chatId, config.telegram.replies.bindInvalid);
-    }
-
-    let row: BindRow;
-    try {
-      row = binds.prepare('telegram', userId, message.username, id, message.date);
-      writer.record({ id: `tg:bind:${message.chatId}:${message.messageId}`, kind: 'bind', row });
-      binds.apply(row);
-    } catch (err) {
-      log.error('bind not saved', { platform: 'telegram', user: userId, err });
-      return this.say(message.chatId, config.bind.replies.error);
-    }
-    log.info('bind saved', { platform: 'telegram', user: userId, duplicateUid: row.duplicate_uid });
-    await this.say(message.chatId, config.bind.replies.success);
-  }
-
   /** A message with no image: a link is a content submission, a quest name alone is a reminder, anything else gets help. */
   private async textMessage(message: TgMessage): Promise<void> {
     const { config, matcher } = this.deps;
     const text = message.text ?? message.caption ?? '';
     const link = firstLinkIn(text, message.entities);
-    const bound = this.deps.binds.lookup('telegram', String(message.fromId)) !== undefined;
 
     if (this.ended(message)) return this.say(message.chatId, config.replies.ended);
     if (link === undefined && matcher.match(text).kind === 'none') return this.say(message.chatId, this.helpText);
     if (link === undefined) {
-      return this.say(message.chatId, this.withUnboundReminder(config.telegram.replies.noImage, bound));
+      return this.say(message.chatId, config.telegram.replies.noImage);
     }
-    await this.submitLink(message, text, link, bound);
+    await this.submitLink(message, text, link);
   }
 
-  private async submitLink(message: TgMessage, text: string, link: string, bound: boolean): Promise<void> {
-    const { config, binds } = this.deps;
-    const bind = binds.lookup('telegram', String(message.fromId));
+  private async submitLink(message: TgMessage, text: string, link: string): Promise<void> {
+    const { config } = this.deps;
     const questType = config.telegram.linkQuestType;
     const id = `tg:sub:${message.chatId}:${message.messageId}`;
     if (this.deps.writer.has(id)) return; // delivered twice
@@ -133,7 +102,6 @@ export class TelegramService {
     const messageLink = await this.copyToReview(message, [message.messageId], {
       questType,
       fuzzy: false,
-      uid: bind?.uid,
       text,
     });
     const row = buildSubmissionRow(
@@ -145,10 +113,10 @@ export class TelegramService {
         content: text,
         url: messageLink,
       },
-      { platform: 'telegram', questType, fuzzy: false, attachmentUrl: '', bind, linkUrl: link },
+      { platform: 'telegram', questType, fuzzy: false, attachmentUrl: '', linkUrl: link },
     );
     if (!this.record(message.chatId, id, row)) return await this.say(message.chatId, config.telegram.replies.error);
-    await this.say(message.chatId, this.withUnboundReminder(config.telegram.replies.ugcLogged, bound));
+    await this.say(message.chatId, config.telegram.replies.ugcLogged);
   }
 
   /**
@@ -167,17 +135,15 @@ export class TelegramService {
 
   /** One or more photos from one member become one submission: the caption may sit on any of them. */
   private async submitImages(parts: TgMessage[]): Promise<void> {
-    const { config, matcher, binds } = this.deps;
+    const { config, matcher } = this.deps;
     const first = parts[0];
     if (first === undefined) return;
     const captioned = parts.find((p) => (p.caption ?? '').trim() !== '');
     const caption = captioned?.caption ?? '';
-    const bind = binds.lookup('telegram', String(first.fromId));
-    const bound = bind !== undefined;
 
     if (this.ended(first)) return this.say(first.chatId, config.replies.ended);
 
-    const outcome = classifyImageMessage({ text: caption, hasImage: true, bound }, matcher);
+    const outcome = classifyImageMessage({ text: caption, hasImage: true }, matcher);
     if (outcome.action !== 'log') return;
     const id = `tg:sub:${first.chatId}:${first.messageId}`;
     if (this.deps.writer.has(id)) return; // delivered twice
@@ -186,7 +152,6 @@ export class TelegramService {
     const messageLink = await this.copyToReview(first, messageIds, {
       questType: outcome.questType,
       fuzzy: outcome.fuzzy,
-      uid: bind?.uid,
       text: caption,
     });
     const fileId = first.images[0]?.fileId ?? '';
@@ -205,7 +170,6 @@ export class TelegramService {
         fuzzy: outcome.fuzzy,
         // The file_id, never a download URL: that would contain the bot token.
         attachmentUrl: fileId,
-        bind,
         ...(captioned ? { linkUrl: firstLinkIn(caption, captioned.entities) ?? '' } : {}),
       },
     );
@@ -218,7 +182,7 @@ export class TelegramService {
         : outcome.reaction === 'success'
           ? replies.logged.replaceAll('{quest}', questNameFor(config.quests, outcome.questType))
           : replies.unmatched;
-    await this.say(first.chatId, this.withUnboundReminder(text, bound));
+    await this.say(first.chatId, text);
   }
 
   /**
@@ -234,7 +198,6 @@ export class TelegramService {
         user: row.user_id,
         questType: row.quest_type,
         fuzzy: row.fuzzy_match,
-        bound: row.bound,
       });
       return true;
     } catch (err) {
@@ -253,7 +216,7 @@ export class TelegramService {
   private async copyToReview(
     message: TgMessage,
     messageIds: number[],
-    info: { questType: string; fuzzy: boolean; uid: string | undefined; text: string },
+    info: { questType: string; fuzzy: boolean; text: string },
   ): Promise<string> {
     const { api, log, reviewChannelId } = this.deps;
     const [firstId, ...rest] = messageIds;
@@ -279,10 +242,6 @@ export class TelegramService {
 
   private ended(message: TgMessage): boolean {
     return hasEnded(this.deps.campaignEnd, message.date);
-  }
-
-  private withUnboundReminder(text: string, bound: boolean): string {
-    return bound ? text : `${text}\n\n${this.deps.config.telegram.replies.unbound}`;
   }
 
   private async say(chatId: number, text: string): Promise<void> {
@@ -313,12 +272,11 @@ export function reviewLink(channelId: string, messageId: number): string {
 export function reviewCaption(info: {
   userId: string;
   username: string;
-  uid: string | undefined;
   questType: string;
   fuzzy: boolean;
   text: string;
 }): string {
-  const head = `User ${info.userId} ${info.username} | UID ${info.uid ?? 'not linked'} | ${info.questType}${info.fuzzy ? ' (flagged for review)' : ''}`;
+  const head = `User ${info.userId} ${info.username} | ${info.questType}${info.fuzzy ? ' (flagged for review)' : ''}`;
   const text = info.text.trim();
   const full = text === '' ? head : `${head}\n\n${text}`;
   return full.length <= CAPTION_LIMIT ? full : `${full.slice(0, CAPTION_LIMIT - 1)}…`;

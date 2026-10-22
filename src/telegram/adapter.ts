@@ -2,7 +2,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { Bot, GrammyError, HttpError } from 'grammy';
 import type { AppConfig } from '../config.js';
-import type { BindStore } from '../binds.js';
 import type { Logger } from '../logger.js';
 import type { QuestMatcher } from '../matcher.js';
 import type { SheetWriter } from '../writer.js';
@@ -21,9 +20,8 @@ export class TelegramAuthError extends Error {
 export interface TelegramAdapterOptions {
   token: string;
   reviewChannelId: string;
-  config: Pick<AppConfig, 'quests' | 'bind' | 'replies' | 'telegram' | 'imageExtensions'>;
+  config: Pick<AppConfig, 'quests' | 'replies' | 'telegram' | 'imageExtensions'>;
   matcher: QuestMatcher;
-  binds: BindStore;
   writer: Pick<SheetWriter, 'record' | 'has'>;
   campaignEnd?: Date | undefined;
   log: Logger;
@@ -74,7 +72,6 @@ export class TelegramAdapter {
     this.service = new TelegramService({
       config: options.config,
       matcher: options.matcher,
-      binds: options.binds,
       writer: options.writer,
       api,
       reviewChannelId: options.reviewChannelId,
@@ -109,7 +106,6 @@ export class TelegramAdapter {
     await this.bot.api
       .setMyCommands([
         { command: 'start', description: 'How it works' },
-        { command: 'bind', description: 'Link your account ID, e.g. /bind 123456789' },
         { command: 'help', description: 'How it works, and the quest names' },
       ])
       .catch((err: unknown) => this.options.log.warn('could not set the command menu', { err }));

@@ -50,11 +50,9 @@ async function main(): Promise<number> {
   const wal = new WriteAheadLog(walPath);
   try {
     const state = dryRun ? wal.read() : wal.open();
-    const submissions = state.pending.filter((e) => e.kind === 'submission').length;
     log.info('write-ahead log read', {
       path: walPath,
-      pendingSubmissions: submissions,
-      pendingBinds: state.pending.length - submissions,
+      pendingSubmissions: state.pending.length,
       corruptLines: state.corruptLines,
     });
     if (state.pending.length === 0) {
@@ -63,8 +61,7 @@ async function main(): Promise<number> {
     }
     if (dryRun) {
       for (const entry of state.pending) {
-        const detail = entry.kind === 'submission' ? entry.row.quest_type : `uid ${entry.row.uid}`;
-        process.stdout.write(`${entry.row.timestamp_utc}  ${entry.kind.padEnd(10)}  ${entry.id}  ${detail}\n`);
+        process.stdout.write(`${entry.row.timestamp_utc}  ${entry.id}  ${entry.row.quest_type}\n`);
       }
       return 0;
     }
@@ -80,7 +77,7 @@ async function main(): Promise<number> {
     writer.restore(state);
     const complete = await writer.drainAll();
     log.info(complete ? 'replay complete' : 'replay incomplete; run it again once Sheets is reachable', {
-      written: writer.stats.appended + writer.stats.updated,
+      written: writer.stats.appended,
       alreadyInSheet: writer.stats.skippedExisting,
       remaining: writer.pendingCount,
     });

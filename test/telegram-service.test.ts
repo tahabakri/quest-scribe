@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BindStore } from '../src/binds.js';
 import { parseConfig } from '../src/config.js';
 import type { Logger } from '../src/logger.js';
 import { QuestMatcher } from '../src/matcher.js';
@@ -30,24 +29,15 @@ quests:
     name: Event Join
   - keyword: join event
     type: event_join
-bind:
-  command_description: Link your account
-  id_label: uid
-  id_description: Your account ID
-  replies: { success: "Linked!", invalid: "Invalid ID.", error: "Bind failed." }
-replies: { unmatched: a, no_image: b, unbound: c, ended: "Season over." }
+replies: { ended: "Season over." }
 telegram:
   welcome: "Welcome!"
   link_quest_type: ugc
   replies:
-    bind_usage: "Usage: /bind 123456789"
-    bind_invalid: "Not a valid ID."
-    group_bind: "Message me privately."
     logged: "Done: {quest}. Cheers!"
     unmatched: "No match. Saved."
     no_caption: "Saved. Add a caption."
     no_image: "Attach a screenshot."
-    unbound: "Run /bind first."
     ugc_logged: "Logged your link."
     error: "Something broke."
 `,
@@ -97,12 +87,10 @@ function setup(options: Options = {}) {
       await options.copyMore?.(args);
     },
   };
-  const binds = new BindStore();
   const { log, lines } = memoryLogger();
   const service = new TelegramService({
     config,
     matcher: options.matcher ?? new QuestMatcher(config.quests, config.fuzzyThreshold),
-    binds,
     writer: {
       has: (id) => known.has(id),
       record: (entry) => {
@@ -119,11 +107,9 @@ function setup(options: Options = {}) {
     log,
     albumWaitMs: 1000,
   });
-  const bindUser = (uid = '123456', userId = String(USER)) =>
-    binds.apply(binds.prepare('telegram', userId, '@member', uid, new Date('2026-10-01T00:00:00Z')));
   const submissions = () => recorded.filter((e) => e.kind === 'submission').map((e) => e.row);
   const replies = () => sent.map((s) => s.text);
-  return { service, binds, bindUser, sent, copies, more, recorded, submissions, replies, lines };
+  return { service, sent, copies, more, recorded, submissions, replies, lines };
 }
 
 let seq = 0;
@@ -180,98 +166,34 @@ describe('/start and /help', () => {
   });
 });
 
-describe('/bind', () => {
-  it('saves a valid ID for the Telegram member, with the platform, and confirms', async () => {
+describe('no binding on Telegram', () => {
+  it('has no /bind: it saves nothing and answers with the help text', async () => {
     const t = setup();
-    const m = command('bind', '766000123');
-    await t.service.handle(m);
-    expect(t.replies()).toEqual(['Linked!']);
-    expect(t.recorded).toEqual([
-      {
-        id: `tg:bind:${USER}:${m.messageId}`,
-        kind: 'bind',
-        row: {
-          timestamp_utc: '2026-11-01T10:00:00Z',
-          user_id: String(USER),
-          username: '@member',
-          uid: '766000123',
-          duplicate_uid: false,
-          last_updated_utc: '2026-11-01T10:00:00Z',
-          platform: 'telegram',
-        },
-      },
-    ]);
-    expect(t.binds.lookup('telegram', String(USER))?.uid).toBe('766000123');
-    expect(t.binds.lookup('discord', String(USER))).toBeUndefined();
-  });
-
-  it.each([
-    ['letters', '12ab34'],
-    ['too short (5 digits)', '12345'],
-    ['too long (16 digits)', '1234567890123456'],
-    ['spaces inside', '123 456'],
-  ])('rejects %s and saves nothing', async (_label, value) => {
-    const t = setup();
-    await t.service.handle(command('bind', value));
-    expect(t.replies()).toEqual(['Not a valid ID.']);
-    expect(t.recorded).toHaveLength(0);
-    expect(t.binds.size).toBe(0);
-  });
-
-  it('answers /bind with no ID by showing the usage', async () => {
-    const t = setup();
-    await t.service.handle(command('bind'));
-    expect(t.replies()).toEqual(['Usage: /bind 123456789']);
-    expect(t.recorded).toHaveLength(0);
-  });
-
-  it('accepts digits typed on other keyboards', async () => {
-    const t = setup();
-    await t.service.handle(command('bind', '١٢٣٤٥٦'));
-    expect(t.binds.lookup('telegram', String(USER))?.uid).toBe('123456');
-  });
-
-  it('re-binding updates the same member: one member, first-bound time kept', async () => {
-    const t = setup();
-    await t.service.handle(command('bind', '111111', { date: new Date('2026-11-01T10:00:00Z') }));
-    await t.service.handle(command('bind', '222222', { date: new Date('2026-11-02T10:00:00Z') }));
-    expect(t.binds.size).toBe(1);
-    const second = t.recorded[1]!.row as { timestamp_utc: string; uid: string; last_updated_utc: string };
-    expect(second).toMatchObject({ uid: '222222', timestamp_utc: '2026-11-01T10:00:00Z', last_updated_utc: '2026-11-02T10:00:00Z' });
-  });
-
-  it('flags an ID already bound on Discord, still saves it, and still confirms', async () => {
-    const t = setup();
-    t.binds.apply(t.binds.prepare('discord', '100000000000000001', 'on_discord', '555555', new Date('2026-10-01T00:00:00Z')));
-    await t.service.handle(command('bind', '555555'));
-    expect(t.recorded[0]!.row).toMatchObject({ uid: '555555', duplicate_uid: true, platform: 'telegram' });
-    expect(t.replies()).toEqual(['Linked!']);
-  });
-
-  it('flags an ID bound by a different Telegram member too', async () => {
-    const t = setup();
-    t.bindUser('555555', '7777');
-    await t.service.handle(command('bind', '555555'));
-    expect(t.recorded[0]!.row).toMatchObject({ duplicate_uid: true });
-  });
-
-  it('says so, and saves nothing, when the bind cannot be made durable', async () => {
-    const t = setup({
-      record: () => {
-        throw new Error('disk full');
-      },
-    });
     await t.service.handle(command('bind', '123456'));
-    expect(t.replies()).toEqual(['Bind failed.']);
-    expect(t.binds.size).toBe(0);
+    expect(t.recorded).toHaveLength(0);
+    expect(t.replies()).toHaveLength(1);
+    expect(t.replies()[0]).toContain('Quest names');
   });
 
-  it('in a group: asks the member to write privately, saves nothing', async () => {
+  it('ignores /bind in a group too', async () => {
     const t = setup();
     await t.service.handle(command('bind', '123456', { chatId: -100999, chatType: 'supergroup' }));
-    expect(t.sent).toEqual([{ chatId: -100999, text: 'Message me privately.' }]);
     expect(t.recorded).toHaveLength(0);
-    expect(t.binds.size).toBe(0);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('writes uid blank and bound = FALSE on every row, with the Telegram user ID in user_id, and never reminds anyone to bind', async () => {
+    const t = setup();
+    await t.service.handle(photo('share post'));
+    await t.service.handle(photo('look at my setup'));
+    await t.service.handle(photo(undefined));
+    await t.service.handle(text('my post https://example.com/p'));
+    expect(t.submissions()).toHaveLength(4);
+    for (const row of t.submissions()) {
+      expect(row).toMatchObject({ uid: '', bound: false, user_id: String(USER), platform: 'telegram' });
+    }
+    expect(t.replies().join(' ')).not.toMatch(/bind/i);
+    expect(t.copies.every((c) => !c.caption.includes('UID'))).toBe(true);
   });
 });
 
@@ -296,7 +218,6 @@ describe('what the bot ignores', () => {
 describe('image submissions', () => {
   it('logs a photo with a quest caption, copies it for review, and says what was logged', async () => {
     const t = setup();
-    t.bindUser('123456');
     const m = photo('Share Post ✅');
     await t.service.handle(m);
 
@@ -305,8 +226,8 @@ describe('image submissions', () => {
         timestamp_utc: '2026-11-01T10:00:00Z',
         user_id: String(USER),
         username: '@member',
-        uid: '123456',
-        bound: true,
+        uid: '',
+        bound: false,
         quest_type: 'share_post',
         fuzzy_match: false,
         channel_name: TELEGRAM_CHANNEL_NAME,
@@ -320,7 +241,7 @@ describe('image submissions', () => {
     ]);
     expect(t.recorded[0]!.id).toBe(`tg:sub:${USER}:${m.messageId}`);
     expect(t.copies).toEqual([
-      { fromChatId: USER, messageId: m.messageId, caption: `User ${USER} @member | UID 123456 | share_post\n\nShare Post ✅` },
+      { fromChatId: USER, messageId: m.messageId, caption: `User ${USER} @member | share_post\n\nShare Post ✅` },
     ]);
     expect(t.replies()).toEqual(['Done: Share Post. Cheers!']);
   });
@@ -355,7 +276,6 @@ describe('image submissions', () => {
 
   it('logs a caption that matches nothing as unmatched, keeps the raw text, and says it was saved', async () => {
     const t = setup();
-    t.bindUser();
     await t.service.handle(photo('look at my setup'));
     expect(t.submissions()[0]).toMatchObject({ quest_type: 'unmatched', fuzzy_match: false, message_text: 'look at my setup' });
     expect(t.replies()).toEqual(['No match. Saved.']);
@@ -363,7 +283,6 @@ describe('image submissions', () => {
 
   it('logs a photo with no caption as unmatched and asks for the quest name next time', async () => {
     const t = setup();
-    t.bindUser();
     await t.service.handle(photo(undefined));
     await t.service.handle(photo('   '));
     expect(t.submissions().map((s) => [s.quest_type, s.message_text])).toEqual([
@@ -373,24 +292,16 @@ describe('image submissions', () => {
     expect(t.replies()).toEqual(['Saved. Add a caption.', 'Saved. Add a caption.']);
   });
 
-  it('logs an unbound member (bound = FALSE, uid blank) and adds the /bind reminder', async () => {
+  it('does not know about binds, so there is no reminder', async () => {
     const t = setup();
     await t.service.handle(photo('share post'));
     expect(t.submissions()[0]).toMatchObject({ bound: false, uid: '', quest_type: 'share_post' });
-    expect(t.replies()).toEqual(['Done: Share Post. Cheers!\n\nRun /bind first.']);
-    expect(t.copies[0]!.caption).toContain('UID not linked');
-  });
-
-  it('does not count a Discord member with the same numeric ID as bound', async () => {
-    const t = setup();
-    t.binds.apply(t.binds.prepare('discord', String(USER), 'on_discord', '999999', new Date('2026-10-01T00:00:00Z')));
-    await t.service.handle(photo('share post'));
-    expect(t.submissions()[0]).toMatchObject({ bound: false, uid: '' });
+    expect(t.replies()).toEqual(['Done: Share Post. Cheers!']);
+    expect(t.copies[0]!.caption).not.toContain('UID');
   });
 
   it('a quest name without a screenshot is not logged: the member is reminded', async () => {
     const t = setup();
-    t.bindUser();
     await t.service.handle(text('share post'));
     expect(t.recorded).toHaveLength(0);
     expect(t.copies).toHaveLength(0);
@@ -399,14 +310,12 @@ describe('image submissions', () => {
 
   it('a typo of a quest name without a screenshot gets the same reminder', async () => {
     const t = setup();
-    t.bindUser();
     await t.service.handle(text('share pst'));
     expect(t.replies()).toEqual(['Attach a screenshot.']);
   });
 
   it('uses strict keywords as whole words: "joint" is not the Event Join quest', async () => {
     const t = setup();
-    t.bindUser();
     await t.service.handle(photo('join'));
     await t.service.handle(photo('joint'));
     expect(t.submissions().map((s) => s.quest_type)).toEqual(['event_join', 'unmatched']);
@@ -433,7 +342,6 @@ describe('albums', () => {
   it('logs one row for an album of three photos, using the caption from whichever photo has it', async () => {
     vi.useFakeTimers();
     const t = setup();
-    t.bindUser();
     const group = 'album-1';
     const a = photo(undefined, { messageId: 2001, mediaGroupId: group });
     const b = photo('boost post', { messageId: 2002, mediaGroupId: group });
@@ -457,7 +365,6 @@ describe('albums', () => {
   it('keeps the album in the submission even if copying the rest fails', async () => {
     vi.useFakeTimers();
     const t = setup({ copyMore: () => Promise.reject(new Error('flood')) });
-    t.bindUser();
     await t.service.handle(photo('share post', { messageId: 2101, mediaGroupId: 'g' }));
     await t.service.handle(photo(undefined, { messageId: 2102, mediaGroupId: 'g' }));
     await vi.advanceTimersByTimeAsync(1100);
@@ -468,7 +375,6 @@ describe('albums', () => {
   it('does not log a second row for a photo that arrives after its album was already logged', async () => {
     vi.useFakeTimers();
     const t = setup();
-    t.bindUser();
     await t.service.handle(photo('share post', { messageId: 2151, mediaGroupId: 'slow' }));
     await t.service.handle(photo(undefined, { messageId: 2152, mediaGroupId: 'slow' }));
     await vi.advanceTimersByTimeAsync(1100);
@@ -505,7 +411,6 @@ describe('albums', () => {
 describe('link submissions', () => {
   it('logs a message with a link and no image as the configured link quest, and copies it for review', async () => {
     const t = setup();
-    t.bindUser('123456');
     const m = text('my write-up https://example.com/post/1 enjoy');
     await t.service.handle(m);
     expect(t.submissions()[0]).toMatchObject({
@@ -516,7 +421,7 @@ describe('link submissions', () => {
       channel_name: TELEGRAM_CHANNEL_NAME,
       message_link: 'https://t.me/c/1234567890/701',
       platform: 'telegram',
-      uid: '123456',
+      uid: '',
     });
     expect(t.copies[0]).toMatchObject({ messageId: m.messageId });
     expect(t.replies()).toEqual(['Logged your link.']);
@@ -535,11 +440,11 @@ describe('link submissions', () => {
     expect(t.submissions()[0]).toMatchObject({ quest_type: 'ugc' });
   });
 
-  it('adds the /bind reminder for an unbound member', async () => {
+  it('logs a link without any bind reminder', async () => {
     const t = setup();
     await t.service.handle(text('https://example.com/p'));
     expect(t.submissions()[0]).toMatchObject({ bound: false });
-    expect(t.replies()).toEqual(['Logged your link.\n\nRun /bind first.']);
+    expect(t.replies()).toEqual(['Logged your link.']);
   });
 
   it('ignores addresses without a scheme, as the Discord side does', async () => {
@@ -570,15 +475,13 @@ describe('after the campaign ends', () => {
     expect(t.submissions()).toHaveLength(1);
   });
 
-  it('does not invite anyone to submit: /start, /help and plain chat say the campaign ended, and /bind still works', async () => {
+  it('does not invite anyone to submit: /start, /help and plain chat say the campaign ended', async () => {
     const t = setup({ end: END });
     const late = new Date('2026-12-01T00:00:00Z');
     await t.service.handle(command('start', '', { date: late }));
     await t.service.handle(command('help', '', { date: late }));
     await t.service.handle(text('hello', { date: late }));
-    await t.service.handle(command('bind', '123456', { date: late }));
-    expect(t.replies()).toEqual(['Season over.', 'Season over.', 'Season over.', 'Linked!']);
-    expect(t.binds.size).toBe(1);
+    expect(t.replies()).toEqual(['Season over.', 'Season over.', 'Season over.']);
   });
 
   it('still shows the welcome and help text on the last day', async () => {
@@ -670,15 +573,15 @@ describe('review channel helpers', () => {
   });
 
   it('keeps the review caption within Telegram\'s 1024 characters, whatever the member wrote', () => {
-    const caption = reviewCaption({ userId: '1', username: '@m', uid: '123456', questType: 'share_post', fuzzy: false, text: 'x'.repeat(5000) });
+    const caption = reviewCaption({ userId: '1', username: '@m', questType: 'share_post', fuzzy: false, text: 'x'.repeat(5000) });
     expect(caption.length).toBeLessThanOrEqual(1024);
-    expect(caption.startsWith('User 1 @m | UID 123456 | share_post')).toBe(true);
+    expect(caption.startsWith('User 1 @m | share_post')).toBe(true);
     expect(caption.endsWith('…')).toBe(true);
   });
 
   it('leaves out the text section when there is no caption', () => {
-    expect(reviewCaption({ userId: '1', username: '@m', uid: undefined, questType: 'unmatched', fuzzy: false, text: '  ' })).toBe(
-      'User 1 @m | UID not linked | unmatched',
+    expect(reviewCaption({ userId: '1', username: '@m', questType: 'unmatched', fuzzy: false, text: '  ' })).toBe(
+      'User 1 @m | unmatched',
     );
   });
 });

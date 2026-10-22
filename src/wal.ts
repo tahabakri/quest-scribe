@@ -11,14 +11,12 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { normalizeLegacyRow } from './sheets/schema.js';
-import type { BindRow, SubmissionRow } from './sheets/schema.js';
+import type { SubmissionRow } from './sheets/schema.js';
 
 /** File name inside DATA_DIR. */
 export const WAL_FILENAME = 'fallback.jsonl';
 
-export type WalEntry =
-  | { id: string; kind: 'submission'; row: SubmissionRow }
-  | { id: string; kind: 'bind'; row: BindRow };
+export type WalEntry = { id: string; kind: 'submission'; row: SubmissionRow };
 
 type WalLine =
   | ({ type: 'row'; written_at: string } & WalEntry)
@@ -27,8 +25,6 @@ type WalLine =
 export interface WalState {
   /** Rows never acknowledged by Sheets, in the order they were written. */
   pending: WalEntry[];
-  /** Every bind row ever logged, acked or not: the offline fallback for the bind cache. */
-  binds: BindRow[];
   /** Every row id in the log, so a message is never logged twice. */
   knownIds: Set<string>;
   /** Lines that could not be parsed (e.g. a write torn by a crash). */
@@ -50,7 +46,7 @@ export class WriteAheadLog {
 
   /** Reads the log without opening it for writing. */
   read(): WalState {
-    const state: WalState = { pending: [], binds: [], knownIds: new Set(), corruptLines: 0 };
+    const state: WalState = { pending: [], knownIds: new Set(), corruptLines: 0 };
     if (!existsSync(this.path)) return state;
 
     const rows = new Map<string, WalEntry>();
@@ -70,7 +66,6 @@ export class WriteAheadLog {
       if (rows.has(parsed.id)) continue;
       const entry = { id: parsed.id, kind: parsed.kind, row: parsed.row } as WalEntry;
       rows.set(entry.id, entry);
-      if (entry.kind === 'bind') state.binds.push(entry.row);
     }
     for (const [id, entry] of rows) {
       state.knownIds.add(id);
@@ -141,7 +136,7 @@ function parseLine(line: string): WalLine | undefined {
     if (
       value?.type === 'row' &&
       typeof value.id === 'string' &&
-      (value.kind === 'submission' || value.kind === 'bind') &&
+      value.kind === 'submission' &&
       typeof value.row === 'object' &&
       value.row !== null
     ) {

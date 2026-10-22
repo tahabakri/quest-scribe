@@ -159,7 +159,7 @@ replies:
     const config = parse(MINIMAL);
     expect(config.telegram.replies.logged).toContain('{quest}');
     expect(config.telegram.linkQuestType).toBe('content_link');
-    expect(config.telegram.welcome).toContain('/bind');
+    expect(config.telegram.welcome).toContain('campaign bot');
     expect(config.replies.ended).toMatch(/ended/);
   });
 
@@ -172,14 +172,35 @@ telegram:
   link_quest_type: shared_link
   replies:
     logged: "Done: {quest}"
-    group_bind: Write to me in private
+    no_caption: Add a caption next time
 `,
     ).telegram;
     expect(config.welcome).toBe('Hi there');
     expect(config.linkQuestType).toBe('shared_link');
     expect(config.replies.logged).toBe('Done: {quest}');
-    expect(config.replies.groupBind).toBe('Write to me in private');
-    expect(config.replies.bindUsage).toMatch(/\/bind/); // untouched ones keep their defaults
+    expect(config.replies.noCaption).toBe('Add a caption next time');
+    expect(config.replies.error).toMatch(/try again/); // untouched ones keep their defaults
+  });
+
+  it('knows nothing about binding: the default welcome sends members to the campaign bot, and old bind wording is ignored', () => {
+    const config = parse(
+      MINIMAL +
+        `
+sheets:
+  binds_tab: Binds
+  binds_refresh_minutes: 1
+telegram:
+  replies:
+    bind_usage: Send /bind and your ID
+    bind_invalid: Not an ID
+    group_bind: Message me in private
+    unbound: Run /bind first
+`,
+    );
+    expect(config.telegram.welcome).toMatch(/campaign bot/);
+    expect(config.telegram.welcome).not.toMatch(/\/bind/);
+    expect(config.telegram.replies).not.toHaveProperty('unbound');
+    expect(config.sheets).not.toHaveProperty('bindsTab');
   });
 
   it('reads quest names from the quests', () => {

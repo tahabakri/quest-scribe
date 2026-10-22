@@ -16,21 +16,18 @@ const matcher = new QuestMatcher(
 );
 
 describe('classifyImageMessage', () => {
-  const run = (text: string, hasImage: boolean, bound = true) => classifyImageMessage({ text, hasImage, bound }, matcher);
+  const run = (text: string, hasImage: boolean) => classifyImageMessage({ text, hasImage }, matcher);
 
   it.each([
-    ['image + keyword', 'share post', true, true, { action: 'log', questType: 'share_post', fuzzy: false, reaction: 'success', warnings: [] }],
-    ['image + typo', 'shre post', true, true, { action: 'log', questType: 'share_post', fuzzy: true, reaction: 'success', warnings: [] }],
-    ['image + unrelated caption', 'look at this', true, true, { action: 'log', questType: 'unmatched', fuzzy: false, reaction: 'attention', warnings: ['unmatched'] }],
-    ['image + empty caption', '', true, true, { action: 'log', questType: 'unmatched', fuzzy: false, reaction: 'attention', warnings: ['unmatched'] }],
-    ['keyword without image', 'share post', false, true, { action: 'warn', reaction: 'attention', warnings: ['noImage'] }],
-    ['typo without image', 'shre post', false, true, { action: 'warn', reaction: 'attention', warnings: ['noImage'] }],
-    ['chat without image', 'good morning all', false, true, { action: 'ignore' }],
-    ['unbound + keyword', 'boost post', true, false, { action: 'log', questType: 'boost_post', fuzzy: false, reaction: 'success', warnings: ['unbound'] }],
-    ['unbound + unrelated', 'hello', true, false, { action: 'log', questType: 'unmatched', fuzzy: false, reaction: 'attention', warnings: ['unmatched', 'unbound'] }],
-    ['unbound + no image', 'share post', false, false, { action: 'warn', reaction: 'attention', warnings: ['noImage', 'unbound'] }],
-  ])('%s', (_label, text, hasImage, bound, expected) => {
-    expect(run(text, hasImage, bound)).toEqual(expected);
+    ['image + keyword', 'share post', true, { action: 'log', questType: 'share_post', fuzzy: false, reaction: 'success', warnings: [] }],
+    ['image + typo', 'shre post', true, { action: 'log', questType: 'share_post', fuzzy: true, reaction: 'success', warnings: [] }],
+    ['image + unrelated caption', 'look at this', true, { action: 'log', questType: 'unmatched', fuzzy: false, reaction: 'attention', warnings: ['unmatched'] }],
+    ['image + empty caption', '', true, { action: 'log', questType: 'unmatched', fuzzy: false, reaction: 'attention', warnings: ['unmatched'] }],
+    ['keyword without image', 'share post', false, { action: 'warn', reaction: 'attention', warnings: ['noImage'] }],
+    ['typo without image', 'shre post', false, { action: 'warn', reaction: 'attention', warnings: ['noImage'] }],
+    ['chat without image', 'good morning all', false, { action: 'ignore' }],
+  ])('%s', (_label, text, hasImage, expected) => {
+    expect(run(text, hasImage)).toEqual(expected);
   });
 });
 
@@ -42,7 +39,7 @@ describe('classifyImageMessage: close variants', () => {
     ],
     0.8,
   );
-  const run = (text: string) => classifyImageMessage({ text, hasImage: true, bound: true }, variantMatcher);
+  const run = (text: string) => classifyImageMessage({ text, hasImage: true }, variantMatcher);
 
   it('flags a close variant for manual review, like a typo, and still counts it as a success', () => {
     expect(run('sharing post')).toEqual({
@@ -118,23 +115,14 @@ describe('buildSubmissionRow', () => {
         questType: 'share_post',
         fuzzy: false,
         attachmentUrl: 'https://cdn.example.com/shot.png',
-        bind: {
-          timestamp_utc: '',
-          user_id: '100000000000000001',
-          username: 'member_a',
-          uid: '123456',
-          duplicate_uid: false,
-          last_updated_utc: '',
-          platform: 'discord',
-        },
       },
     );
     expect(row).toEqual({
       timestamp_utc: '2026-03-04T05:06:07Z',
       user_id: '100000000000000001',
       username: 'member_a',
-      uid: '123456',
-      bound: true,
+      uid: '',
+      bound: false,
       quest_type: 'share_post',
       fuzzy_match: false,
       channel_name: 'submissions',

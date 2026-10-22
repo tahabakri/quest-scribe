@@ -29,26 +29,18 @@ describe('config', () => {
 
     expect(config.quests.map((q) => q.type)).toEqual(['daily_check_in', 'share_post', 'event_attendance', 'invite']);
     expect(config.fuzzyThreshold).toBe(0.8);
-    expect(config.bind.idPattern.test('123456')).toBe(true);
-    expect(config.bind.idPattern.test('12345a')).toBe(false);
     expect(config.sheets).toEqual({
-      bindsTab: 'Binds',
       submissionsTab: 'Submissions',
       flushIntervalSeconds: 5,
       flushMaxRows: 20,
-      bindsRefreshMinutes: 10,
     });
   });
 
   it('applies defaults for every optional setting', () => {
     const config = parse(MINIMAL);
     expect(config.fuzzyThreshold).toBe(0.8);
-    expect(config.bind.idPattern.source).toBe('^\\d{6,15}$');
-    expect(config.bind.replies.success).toMatch(/linked/);
-    expect(config.bind.replies.error).toMatch(/try again/);
     expect(config.replies.ended).toMatch(/ended/);
     expect(config.imageExtensions).toEqual(['png', 'jpg', 'jpeg', 'gif', 'webp']);
-    expect(config.sheets.bindsTab).toBe('Binds');
     expect(config.sheets.flushMaxRows).toBe(20);
   });
 
@@ -65,8 +57,8 @@ describe('config', () => {
   });
 
   it('interpolates ${VAR} and reports every missing variable at once', () => {
-    const text = `${MINIMAL}bind:\n  replies:\n    success: "\${FIRST}"\n    error: "\${SECOND}"\n`;
-    expect(parse(text, { FIRST: 'Done!', SECOND: 'Oops' }).bind.replies.success).toBe('Done!');
+    const text = `${MINIMAL}telegram:\n  replies:\n    logged: "\${FIRST}"\n    error: "\${SECOND}"\n`;
+    expect(parse(text, { FIRST: 'Done!', SECOND: 'Oops' }).telegram.replies.logged).toBe('Done!');
     const message = configError(() => parse(text, { FIRST: '  ' }));
     expect(message).toContain('FIRST');
     expect(message).toContain('SECOND');
@@ -88,10 +80,8 @@ describe('config', () => {
 
   it.each([
     ['an unknown key (typo)', MINIMAL + '\nfuzzy_treshold: 0.7\n', /fuzzy_treshold/],
-    ['an unknown key inside bind (typo)', MINIMAL + 'bind:\n  id_patern: abc\n', /bind/],
     ['a threshold above 1', MINIMAL + '\nfuzzy_threshold: 1.5\n', /fuzzy_threshold: must be at most 1/],
     ['a threshold of 0', MINIMAL + '\nfuzzy_threshold: 0\n', /fuzzy_threshold: must be greater than 0/],
-    ['an invalid ID regex', MINIMAL + "bind:\n  id_pattern: '(['\n", /bind\.id_pattern/],
     [
       'a duplicate keyword (ignoring case and punctuation)',
       MINIMAL.replace('    type: daily_check_in', '    type: daily_check_in\n  - keyword: "DAILY  check_in!"\n    type: other'),
@@ -113,7 +103,6 @@ describe('config', () => {
       MINIMAL.replace('    type: daily_check_in', '    type: daily_check_in\n    review: sometimes'),
       /quests\[0\]\.review/,
     ],
-    ['the same tab for binds and submissions', MINIMAL + 'sheets:\n  binds_tab: Same\n  submissions_tab: Same\n', /submissions_tab: must differ from binds_tab/],
     ['invalid YAML', 'quests: [unclosed', /invalid YAML/],
   ])('rejects %s', (_label, text, expected) => {
     expect(configError(() => parse(text))).toMatch(expected);
@@ -159,8 +148,6 @@ telegram:
   it('ignores everything that only the Discord bot uses, and keeps the shared and Telegram settings', () => {
     const config = parse(SHARED);
     expect(config.quests[0]).toMatchObject({ keyword: 'daily check-in', type: 'daily_check_in', name: 'Daily Check-In' });
-    expect(config.bind.idPattern.source).toBe('^\\d{6,12}$');
-    expect(config.bind.replies.success).toBe('Linked.');
     expect(config.replies.ended).toBe('Season over.');
     expect(config.telegram.welcome).toBe('Hi there');
   });

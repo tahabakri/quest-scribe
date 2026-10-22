@@ -1,5 +1,4 @@
 import { join } from 'node:path';
-import { BindStore, keepBindsFresh } from './binds.js';
 import { ConfigError, loadConfig } from './config.js';
 import { loadDotEnv, readCampaignEnd, readRuntimeEnv, readSheetsEnv, readTelegramEnv } from './env.js';
 import { LockError, acquireDataLock } from './lock.js';
@@ -36,32 +35,19 @@ async function main(): Promise<void> {
   const writer = new SheetWriter({
     gateway: createGoogleSheetsGateway(sheetsEnv),
     wal,
-    tabs: { submissions: config.sheets.submissionsTab, binds: config.sheets.bindsTab },
+    tabs: { submissions: config.sheets.submissionsTab },
     flushIntervalMs: config.sheets.flushIntervalSeconds * 1000,
     flushMaxRows: config.sheets.flushMaxRows,
     log: log.child('sheets'),
   });
   writer.restore(state);
 
-  // Binds: start from the log's history, then prefer the sheet when it can be read.
-  // A sheet that is unreachable or misconfigured never stops the bot: submissions
-  // keep landing in the log, and writes resume once the sheet is fixed.
-  const binds = new BindStore();
-  binds.loadHistory(state.binds);
-  const refreshBinds = () => writer.refreshBinds((rows, pending) => binds.replace(rows, pending));
-  const loaded = await refreshBinds();
-  log.info(loaded ? 'sheet ready' : 'sheet not usable yet; rows will wait in the write-ahead log', {
-    binds: binds.size,
-  });
+  // A sheet that is unreachable or misconfigured never stops the bot: submissions keep
+  // landing in the write-ahead log, and writes resume once the sheet is fixed.
+  const sheetReady = await writer.prepare();
+  log.info(sheetReady ? 'sheet ready' : 'sheet not usable yet; rows will wait in the write-ahead log');
   writer.start();
   if (state.pending.length > 0) void writer.flush();
-  keepBindsFresh({
-    refresh: refreshBinds,
-    loaded,
-    intervalMs: config.sheets.bindsRefreshMinutes * 60_000,
-    retryMs: 30_000,
-    onError: (err) => log.error('binds refresh failed', { err }),
-  });
 
   let stopping = false;
   const shutdown = (reason: string, exitCode: number): void => {
@@ -90,7 +76,6 @@ async function main(): Promise<void> {
     apiRoot: telegramEnv.apiRoot,
     config,
     matcher: new QuestMatcher(config.quests, config.fuzzyThreshold),
-    binds,
     writer,
     campaignEnd,
     log: log.child('telegram'),

@@ -3,12 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { silentLogger } from '../src/logger.js';
-import { BIND_HEADERS, BIND_UPGRADE_FROM, SUBMISSION_HEADERS, SUBMISSION_UPGRADE_FROM } from '../src/sheets/schema.js';
+import { SUBMISSION_HEADERS, SUBMISSION_UPGRADE_FROM } from '../src/sheets/schema.js';
 import { type WalEntry, WriteAheadLog } from '../src/wal.js';
 import { SheetWriter, type WriterOptions } from '../src/writer.js';
-import { FakeSheets, bind, submission } from './fakes.js';
+import { FakeSheets, submission } from './fakes.js';
 
-const TABS = { submissions: 'Submissions', binds: 'Binds' };
+const TABS = { submissions: 'Submissions' };
 const logs: WriteAheadLog[] = [];
 
 function setup(overrides: Partial<WriterOptions> = {}) {
@@ -108,12 +108,12 @@ describe('SheetWriter: batching', () => {
     expect(new WriteAheadLog(wal.path).read().pending).toHaveLength(1);
   });
 
-  it('creates both tabs with the exact headers', async () => {
+  it('creates its tab with the exact headers, and never creates or touches a Binds tab', async () => {
     const { sheets, writer } = setup();
     writer.record(submission());
     await writer.flush();
     expect(sheets.tabs.get('Submissions')![0]).toEqual([...SUBMISSION_HEADERS]);
-    expect(sheets.tabs.get('Binds')![0]).toEqual([...BIND_HEADERS]);
+    expect(sheets.tabs.has('Binds')).toBe(false);
   });
 });
 
@@ -140,7 +140,7 @@ describe('SheetWriter: failures', () => {
   it('keeps rows in the log while Sheets is down, pauses, and replays them after a restart', async () => {
     const { wal, sheets, writer, sleeps } = setup();
     sheets.failNext(Number.POSITIVE_INFINITY);
-    const rows = [submission(), submission(), bind()];
+    const rows = [submission(), submission(), submission()];
     for (const row of rows) writer.record(row);
     await writer.flush();
 
@@ -157,8 +157,7 @@ describe('SheetWriter: failures', () => {
     const { writer: after, wal: reopened } = restart(wal, sheets);
     expect(after.pendingCount).toBe(3);
     await expect(after.drainAll()).resolves.toBe(true);
-    expect(sheets.dataRows(TABS.submissions)).toHaveLength(2);
-    expect(sheets.dataRows(TABS.binds)).toHaveLength(1);
+    expect(sheets.dataRows(TABS.submissions)).toHaveLength(3);
     expect(new WriteAheadLog(reopened.path).read().pending).toHaveLength(0);
   });
 
@@ -230,10 +229,12 @@ describe('SheetWriter: failures', () => {
     expect(sheets.dataRows(TABS.submissions)).toHaveLength(2);
   });
 
-  it('refreshBinds reports mismatched headers instead of throwing', async () => {
+  it('prepare() reports an unusable sheet instead of throwing, and a usable one as ready', async () => {
     const { sheets, writer } = setup();
-    sheets.tabs.set(TABS.binds, [['wrong']]);
-    await expect(writer.refreshBinds(() => {})).resolves.toBe(false);
+    sheets.tabs.set(TABS.submissions, [['wrong']]);
+    await expect(writer.prepare()).resolves.toBe(false);
+    sheets.tabs.set(TABS.submissions, [[...SUBMISSION_HEADERS]]);
+    await expect(writer.prepare()).resolves.toBe(true);
   });
 
   it('refuses to write under mismatched headers and keeps the rows', async () => {
@@ -250,106 +251,9 @@ describe('SheetWriter: failures', () => {
   });
 });
 
-describe('SheetWriter: binds', () => {
-  const USER_A = '100000000000000001';
-  const USER_B = '100000000000000002';
-
-  it('re-binding updates the same row and keeps the first-bound timestamp', async () => {
-    const { sheets, writer } = setup();
-    writer.record(bind({ user_id: USER_A, uid: '111111', timestamp_utc: '2026-01-01T00:00:00Z', last_updated_utc: '2026-01-01T00:00:00Z' }));
-    await writer.flush();
-    writer.record(bind({ user_id: USER_A, uid: '222222', timestamp_utc: '2026-01-02T00:00:00Z', last_updated_utc: '2026-01-02T00:00:00Z' }));
-    await writer.flush();
-
-    expect(sheets.dataRows(TABS.binds)).toEqual([
-      ['2026-01-01T00:00:00Z', USER_A, 'member_one', '222222', false, '2026-01-02T00:00:00Z', 'discord'],
-    ]);
-  });
-
-  it('adds a row per user and finds existing rows even after the sheet was re-sorted', async () => {
-    const { sheets, writer } = setup();
-    writer.record(bind({ user_id: USER_A, uid: '111111' }));
-    writer.record(bind({ user_id: USER_B, uid: '111111', duplicate_uid: true }));
-    await writer.flush();
-    const table = sheets.tabs.get(TABS.binds)!;
-    table.splice(1, 2, table[2]!, table[1]!); // a reviewer sorts the sheet
-
-    writer.record(bind({ user_id: USER_A, uid: '333333' }));
-    await writer.flush();
-    const byUser = new Map(sheets.dataRows(TABS.binds).map((r) => [r[1], r]));
-    expect(sheets.dataRows(TABS.binds)).toHaveLength(2);
-    expect(byUser.get(USER_A)![3]).toBe('333333');
-    expect(byUser.get(USER_B)![3]).toBe('111111');
-    expect(byUser.get(USER_B)![4]).toBe(true);
-  });
-
-  it('collapses several binds from one user in a batch to the latest', async () => {
-    const { sheets, writer } = setup();
-    writer.record(bind({ uid: '111111' }));
-    writer.record(bind({ uid: '222222' }));
-    await writer.flush();
-    expect(sheets.dataRows(TABS.binds).map((r) => r[3])).toEqual(['222222']);
-  });
-
-  it('does not duplicate a bind row when a failed append had gone through', async () => {
-    const { sheets, writer } = setup();
-    sheets.failNext(1, { op: 'appendRows', applied: true });
-    writer.record(bind());
-    await writer.flush();
-    expect(sheets.dataRows(TABS.binds)).toHaveLength(1);
-  });
-
-  it('never lets a replayed older bind overwrite a newer one already in the sheet', async () => {
-    const { wal, sheets } = setup();
-    // Run 1: bind 111111 reaches the sheet but its ack is lost; a later re-bind to 222222 completes.
-    const lossy = new SheetWriter({
-      gateway: sheets,
-      wal: { append: (e: WalEntry) => wal.append(e), ack: () => { throw new Error('ack lost'); } },
-      tabs: TABS,
-      flushIntervalMs: 5_000,
-      flushMaxRows: 20,
-      log: silentLogger,
-    });
-    lossy.record(bind({ user_id: USER_A, uid: '111111', last_updated_utc: '2026-01-01T00:00:00Z' }));
-    await lossy.flush();
-    const newer = bind({ user_id: USER_A, uid: '222222', last_updated_utc: '2026-01-02T00:00:00Z' });
-    wal.append(newer);
-    wal.ack([newer.id]);
-    sheets.tabs.get(TABS.binds)![1]![3] = '222222';
-    sheets.tabs.get(TABS.binds)![1]![5] = '2026-01-02T00:00:00Z';
-
-    // Run 2: the stale 111111 bind is still un-acked and gets replayed.
-    const { writer, wal: reopened } = restart(wal, sheets);
-    expect(writer.pendingBinds().map((r) => r.uid)).toEqual(['111111']);
-    await writer.drainAll();
-    expect(sheets.dataRows(TABS.binds).map((r) => r[3])).toEqual(['222222']);
-    expect(new WriteAheadLog(reopened.path).read().pending).toHaveLength(0);
-  });
-
-  it('keeps the newest bind per user even if a batch holds them out of order', async () => {
-    const { sheets, writer } = setup();
-    writer.record(bind({ uid: '333333', last_updated_utc: '2026-01-03T00:00:00Z' }));
-    writer.record(bind({ uid: '111111', last_updated_utc: '2026-01-01T00:00:00Z' }));
-    await writer.flush();
-    expect(sheets.dataRows(TABS.binds).map((r) => r[3])).toEqual(['333333']);
-  });
-
-  it('refreshBinds hands over sheet rows plus binds not yet written', async () => {
-    const { writer } = setup();
-    writer.record(bind({ user_id: USER_A, uid: '111111' }));
-    await writer.flush();
-    writer.record(bind({ user_id: USER_B, uid: '222222' })); // queued, not yet flushed
-    const apply = vi.fn();
-    await writer.refreshBinds(apply);
-    const [sheetRows, pending] = apply.mock.calls[0] as [Array<{ uid: string }>, Array<{ uid: string }>];
-    expect(sheetRows.map((r) => r.uid)).toEqual(['111111']);
-    expect(pending.map((r) => r.uid)).toEqual(['222222']);
-  });
-});
-
 describe('SheetWriter: a sheet from before Telegram support', () => {
   const OLD_SUBMISSION_HEADERS = [...SUBMISSION_UPGRADE_FROM[0]!];
-  const OLD_BIND_HEADERS = [...BIND_UPGRADE_FROM[0]!];
+  const OLD_BIND_HEADERS = ['timestamp_utc', 'discord_user_id', 'discord_username', 'uid', 'duplicate_uid', 'last_updated_utc'];
   const oldSubmission = ['2026-01-01T00:00:00Z', '100000000000000001', 'old_member', '111111', true, 'daily_check_in', false, 'submissions', 'old text', 'https://cdn.example.com/o.png', '', 'https://discord.com/channels/1/2/9', '2026-01-01'];
   const oldBind = ['2026-01-01T00:00:00Z', '100000000000000001', 'old_member', '111111', false, '2026-01-01T00:00:00Z'];
 
@@ -361,7 +265,7 @@ describe('SheetWriter: a sheet from before Telegram support', () => {
     await writer.flush();
 
     expect(sheets.tabs.get('Submissions')![0]).toEqual([...SUBMISSION_HEADERS]);
-    expect(sheets.tabs.get('Binds')![0]).toEqual([...BIND_HEADERS]);
+    expect(sheets.tabs.get('Binds')![0]).toEqual(OLD_BIND_HEADERS); // the Binds tab is the Discord bot's: left exactly as it was
     expect(sheets.dataRows('Submissions')).toHaveLength(2);
     expect(sheets.dataRows('Submissions')[0]).toEqual(oldSubmission);
     expect(sheets.dataRows('Binds')).toEqual([oldBind]);
@@ -373,7 +277,6 @@ describe('SheetWriter: a sheet from before Telegram support', () => {
   it('also accepts headers that were renamed by hand before the platform column was added', async () => {
     const { sheets, writer } = setup();
     sheets.tabs.set('Submissions', [[...SUBMISSION_HEADERS.slice(0, 13)], oldSubmission]);
-    sheets.tabs.set('Binds', [[...BIND_HEADERS.slice(0, 6)], oldBind]);
     writer.record(submission());
     await writer.flush();
     expect(sheets.tabs.get('Submissions')![0]).toEqual([...SUBMISSION_HEADERS]);
@@ -393,7 +296,6 @@ describe('SheetWriter: a sheet from before Telegram support', () => {
   it('keeps writing after the upgrade without upgrading again', async () => {
     const { sheets, writer } = setup();
     sheets.tabs.set('Submissions', [OLD_SUBMISSION_HEADERS]);
-    sheets.tabs.set('Binds', [OLD_BIND_HEADERS]);
     writer.record(submission());
     await writer.flush();
     writer.record(submission());
@@ -402,37 +304,9 @@ describe('SheetWriter: a sheet from before Telegram support', () => {
     expect(sheets.tabs.get('Submissions')![0]).toEqual([...SUBMISSION_HEADERS]);
   });
 
-  it('treats a blank platform cell as Discord when a bind is updated, and fills the cell', async () => {
-    const { sheets, writer } = setup();
-    sheets.tabs.set('Submissions', [OLD_SUBMISSION_HEADERS]);
-    sheets.tabs.set('Binds', [OLD_BIND_HEADERS, oldBind]);
-    writer.record(bind({ user_id: '100000000000000001', uid: '222222', last_updated_utc: '2026-01-02T00:00:00Z' }));
-    await writer.flush();
-    expect(sheets.dataRows('Binds')).toEqual([
-      ['2026-01-01T00:00:00Z', '100000000000000001', 'member_one', '222222', false, '2026-01-02T00:00:00Z', 'discord'],
-    ]);
-  });
 });
 
 describe('SheetWriter: two platforms', () => {
-  it('keeps the same user ID on two platforms as two members, and updates only the right one', async () => {
-    const { sheets, writer } = setup();
-    writer.record(bind({ user_id: '555', platform: 'discord', uid: '111111' }));
-    writer.record(bind({ user_id: '555', platform: 'telegram', uid: '111111', duplicate_uid: true }));
-    await writer.flush();
-    expect(sheets.dataRows('Binds').map((r) => [r[1], r[3], r[4], r[6]])).toEqual([
-      ['555', '111111', false, 'discord'],
-      ['555', '111111', true, 'telegram'],
-    ]);
-
-    writer.record(bind({ user_id: '555', platform: 'telegram', uid: '222222', last_updated_utc: '2026-01-16T00:00:00Z' }));
-    await writer.flush();
-    expect(sheets.dataRows('Binds').map((r) => [r[3], r[6]])).toEqual([
-      ['111111', 'discord'],
-      ['222222', 'telegram'],
-    ]);
-  });
-
   it('writes a Telegram submission with its platform in the last column', async () => {
     const { sheets, writer } = setup();
     writer.record(submission({ platform: 'telegram', channel_name: 'telegram_dm', attachment_url: 'AgACAgIAAxkBAAI' }));
