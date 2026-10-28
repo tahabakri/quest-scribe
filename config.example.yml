@@ -64,6 +64,7 @@ replies:
 #     unmatched: "We couldn't match that to a quest, so we've saved it for a person to review. Next time, put the quest name in the caption."
 #     no_caption: 'Saved. Next time, add the quest name as the caption.'
 #     no_image: Please attach a screenshot with your submission.
+#     use_group: Please post your screenshot in the community group, with the quest name as the caption.   # private chat, when there is no review channel
 #     ugc_logged: Logged your link. Thank you!
 #     error: Something went wrong on our side. Please try again in a minute.
 

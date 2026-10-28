@@ -51,7 +51,8 @@ Members can submit in a **private chat** with the bot, or **in your community gr
 | anything else | none | the help text |
 
 - **Albums.** Several photos sent at once arrive as separate messages. They are gathered for about two seconds and logged as **one** row, using the caption from whichever photo has it and the first photo as the evidence. A photo that turns up after its album was logged is not a second submission: it is copied to the review channel only.
-- **Evidence stays private.** Every submission is copied into a private **review channel** (`TG_REVIEW_CHANNEL_ID`), with the member's ID, handle, bound ID and quest type as its caption. The row's `message_link` points at that copy, and `attachment_url` holds Telegram's `file_id`. The bot never stores or logs a file download URL: it contains the bot token, and whoever has the token controls the bot. As a second layer, anything that looks like a token is masked in every log line.
+- **Group only, no review channel.** If `TG_REVIEW_CHANNEL_ID` is empty, nothing is copied: a group post is logged with `message_link` pointing at the member's own post (`https://t.me/c/<group>/<message>`, which opens for anyone in the group), and a private chat is told (`telegram.replies.use_group`) to post in the group. The catch: if a member deletes their post, the evidence is gone. Check entries soon after they arrive, or use a review channel.
+- **Evidence stays private (with a review channel).** Every submission is copied into a private **review channel** (`TG_REVIEW_CHANNEL_ID`), with the member's ID, handle, bound ID and quest type as its caption. The row's `message_link` points at that copy, and `attachment_url` holds Telegram's `file_id`. The bot never stores or logs a file download URL: it contains the bot token, and whoever has the token controls the bot. As a second layer, anything that looks like a token is masked in every log line.
 - **Nothing is lost to a Telegram hiccup.** If the review copy fails, the row is still logged, with a placeholder link that can't be opened (and an error in the log). Replies are retried briefly after a network or server error and then given up on; a reply that can't be sent never blocks the messages behind it, and never affects the row.
 - **Downtime.** Telegram keeps messages for a while (about a day) while the bot is offline, and delivers them when it comes back.
 - **A refused token** (revoked, or the bot was deleted) stops the bot with a message that says what to fix. An unreachable Telegram, or a second copy of the bot polling with the same token, is logged and retried.
@@ -130,7 +131,7 @@ You need Node.js 22.12 or newer, a Telegram account, and a Google account.
 
 1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, and choose a name and a username ending in `bot`. Copy the token into `TELEGRAM_BOT_TOKEN`. It is a password: whoever holds it controls the bot. Create the bot from an account your organisation owns, not a personal one, and never paste the token into chat, docs or screenshots.
 2. Send BotFather `/setprivacy`, pick your bot, and choose **Disable**: with privacy mode on, a bot in a group only sees commands, not the photos members post. If you want submissions in the group, add the bot to the group, and put the group's ID (it starts with `-100`) in `TG_GROUP_IDS`. The bot sets its own command menu (`/start`, `/help`) at startup.
-3. Create a **private channel** for evidence, and add the bot to it as an **administrator** with permission to post messages. Copy the channel's ID, which starts with `-100`, into `TG_REVIEW_CHANNEL_ID` (in Telegram Web it is in the address bar when the channel is open). Anyone who can read this channel sees every screenshot submitted, so add only the people who review them.
+3. Optional: create a **private channel** for evidence (without one, group posts are linked in place; see Group only above), and add the bot to it as an **administrator** with permission to post messages. Copy the channel's ID, which starts with `-100`, into `TG_REVIEW_CHANNEL_ID` (in Telegram Web it is in the address bar when the channel is open). Anyone who can read this channel sees every screenshot submitted, so add only the people who review them.
 
 At startup the log says `connected to Telegram as @yourbot` and `review channel ready`, or says exactly what is wrong (a refused token, or a channel the bot can't post in). Telegram is polled over HTTPS: no public URL or webhook is needed.
 
@@ -171,7 +172,7 @@ Everything deployment-specific lives in `config.yml`, which is gitignored. [`con
 | `telegram.welcome` | a generic welcome | The `/start` text. `/help` sends it plus the list of quest names (the first keyword of each quest that is not a `review` variant, in config order). The two together must fit one Telegram message (4096 characters). |
 | `telegram.help_quests_heading` | a generic heading | The line above the quest names in `/help`. |
 | `telegram.link_quest_type` | `content_link` | `quest_type` for a message with a link and no image. |
-| `telegram.replies.*` | generic sentences | `logged` (`{quest}` becomes the quest's name), `unmatched`, `no_caption`, `no_image`, `ugc_logged`, `error`. Plain text, no formatting. |
+| `telegram.replies.*` | generic sentences | `logged` (`{quest}` becomes the quest's name), `unmatched`, `no_caption`, `no_image`, `use_group`, `ugc_logged`, `error`. Plain text, no formatting. |
 | `image_extensions` | `[png, jpg, jpeg, gif, webp]` | File types that count as a screenshot when sent as a file. |
 | `sheets.submissions_tab` | `Submissions` | Tab name. |
 | `sheets.flush_interval_seconds` | `5` | Send queued rows at least this often... |
@@ -182,7 +183,7 @@ Everything deployment-specific lives in `config.yml`, which is gitignored. [`con
 | Variable | Required | Meaning |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | Token from @BotFather. |
-| `TG_REVIEW_CHANNEL_ID` | yes | The private evidence channel, starting with `-100`. |
+| `TG_REVIEW_CHANNEL_ID` | no | The private evidence channel, starting with `-100`. Leave empty to take submissions in the group only (then `TG_GROUP_IDS` is required). |
 | `TG_GROUP_IDS` | no | Community group(s) where members post submissions in the group itself: IDs starting with `-100`, separated by commas. Without it the bot works in private chats only. |
 | `CAMPAIGN_END_UTC` | no | When submissions close, as UTC with a `Z`: `2026-11-22T23:59:59Z`. See [Closing the campaign](#closing-the-campaign). |
 | `TELEGRAM_API_ROOT` | no | Only for a self-hosted Bot API server, for example `http://localhost:8081`. |

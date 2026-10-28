@@ -68,6 +68,8 @@ const TelegramSchema = z.strictObject({
       ),
       no_caption: replyText.default('Saved. Next time, add the quest name as the caption.'),
       no_image: replyText.default('Please attach a screenshot with your submission.'),
+      /** Sent in a private chat when there is no review channel: submissions are taken in the group. */
+      use_group: replyText.default('Please post your screenshot in the community group, with the quest name as the caption.'),
       ugc_logged: replyText.default('Logged your link. Thank you!'),
       error: replyText.default('Something went wrong on our side. Please try again in a minute.'),
     })
@@ -157,6 +159,7 @@ export interface AppConfig {
       unmatched: string;
       noCaption: string;
       noImage: string;
+      useGroup: string;
       ugcLogged: string;
       error: string;
     };
@@ -326,6 +329,7 @@ function toAppConfig(raw: RawConfig): AppConfig {
         unmatched: raw.telegram.replies.unmatched,
         noCaption: raw.telegram.replies.no_caption,
         noImage: raw.telegram.replies.no_image,
+        useGroup: raw.telegram.replies.use_group,
         ugcLogged: raw.telegram.replies.ugc_logged,
         error: raw.telegram.replies.error,
       },

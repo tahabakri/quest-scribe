@@ -98,8 +98,15 @@ describe('readTelegramEnv', () => {
     expect(message).not.toContain('SECRET');
   });
 
-  it('needs the review channel, and it must look like a channel ID', () => {
-    expect(() => readTelegramEnv({ TELEGRAM_BOT_TOKEN: TOKEN })).toThrow(/TG_REVIEW_CHANNEL_ID is not set/);
+  it('works with a group and no review channel, but needs one of the two', () => {
+    expect(readTelegramEnv({ TELEGRAM_BOT_TOKEN: TOKEN, TG_GROUP_IDS: '-1001111111111', TG_REVIEW_CHANNEL_ID: '  ' })).toEqual({
+      token: TOKEN,
+      groupIds: [-1001111111111],
+    });
+    expect(() => readTelegramEnv({ TELEGRAM_BOT_TOKEN: TOKEN })).toThrow(/Set TG_GROUP_IDS/);
+  });
+
+  it('checks the review channel when one is given, and it must look like a channel ID', () => {
     for (const bad of ['1234567890', '@mychannel', '-123456', 'abc']) {
       expect(() => readTelegramEnv({ TELEGRAM_BOT_TOKEN: TOKEN, TG_REVIEW_CHANNEL_ID: bad })).toThrow(/must be a channel ID starting with -100/);
     }

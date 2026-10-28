@@ -81,8 +81,11 @@ export function parseServiceAccount(raw: string): ServiceAccountCredentials {
 
 export interface TelegramEnv {
   token: string;
-  /** The private channel that receives a copy of every submission (starts with -100). */
-  reviewChannelId: string;
+  /**
+   * The private channel that receives a copy of every submission (starts with -100). Without
+   * one, group posts are linked in place and private chats are asked to post in the group.
+   */
+  reviewChannelId?: string;
   /** Only for a self-hosted Bot API server, or for tests: where the Bot API lives. */
   apiRoot?: string;
   /** The community group(s) where members post submissions in the group itself (each starts with -100). */
@@ -98,8 +101,8 @@ export function readTelegramEnv(env: NodeJS.ProcessEnv = process.env): TelegramE
   if (!/^\d{5,}:[A-Za-z0-9_-]{20,}$/.test(token)) {
     throw new ConfigError('TELEGRAM_BOT_TOKEN is not a bot token (it looks like 123456789:ABC...). Copy it again from @BotFather.');
   }
-  const reviewChannelId = required(env, 'TG_REVIEW_CHANNEL_ID');
-  if (!/^-100\d{5,}$/.test(reviewChannelId)) {
+  const reviewChannelId = env.TG_REVIEW_CHANNEL_ID?.trim() || undefined;
+  if (reviewChannelId !== undefined && !/^-100\d{5,}$/.test(reviewChannelId)) {
     throw new ConfigError('TG_REVIEW_CHANNEL_ID must be a channel ID starting with -100, for example -1001234567890.');
   }
   const apiRoot = env.TELEGRAM_API_ROOT?.trim();
@@ -116,7 +119,17 @@ export function readTelegramEnv(env: NodeJS.ProcessEnv = process.env): TelegramE
       }
       return Number(id);
     });
-  return apiRoot ? { token, reviewChannelId, groupIds, apiRoot } : { token, reviewChannelId, groupIds };
+  if (reviewChannelId === undefined && groupIds.length === 0) {
+    throw new ConfigError(
+      'Set TG_GROUP_IDS (members post in the group) or TG_REVIEW_CHANNEL_ID (evidence is copied to a private channel); with neither, there is nowhere to take submissions.',
+    );
+  }
+  return {
+    token,
+    groupIds,
+    ...(reviewChannelId === undefined ? {} : { reviewChannelId }),
+    ...(apiRoot ? { apiRoot } : {}),
+  };
 }
 
 /**

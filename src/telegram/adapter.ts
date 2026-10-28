@@ -19,7 +19,8 @@ export class TelegramAuthError extends Error {
 
 export interface TelegramAdapterOptions {
   token: string;
-  reviewChannelId: string;
+  /** Omit it to take submissions in the group only (see TelegramServiceDeps). */
+  reviewChannelId?: string | undefined;
   config: Pick<AppConfig, 'quests' | 'replies' | 'telegram' | 'imageExtensions'>;
   matcher: QuestMatcher;
   writer: Pick<SheetWriter, 'record' | 'has'>;
@@ -61,6 +62,10 @@ export class TelegramAdapter {
     const retryDelays = options.transientRetryDelaysMs ?? [1000, 3000];
     const again = <T>(call: () => Promise<T>): Promise<T> => withTransientRetries(call, retryDelays, this.abort.signal);
 
+    const reviewChannel = (): string => {
+      if (options.reviewChannelId === undefined) throw new Error('no review channel is configured');
+      return options.reviewChannelId;
+    };
     const api: TelegramApiPort = {
       sendMessage: async (chatId, text, replyTo) => {
         await again(() =>
@@ -68,9 +73,9 @@ export class TelegramAdapter {
         );
       },
       copyToReview: async ({ fromChatId, messageId, caption }) =>
-        (await again(() => this.bot.api.copyMessage(options.reviewChannelId, fromChatId, messageId, { caption }))).message_id,
+        (await again(() => this.bot.api.copyMessage(reviewChannel(), fromChatId, messageId, { caption }))).message_id,
       copyMoreToReview: async ({ fromChatId, messageIds }) => {
-        await again(() => this.bot.api.copyMessages(options.reviewChannelId, fromChatId, messageIds));
+        await again(() => this.bot.api.copyMessages(reviewChannel(), fromChatId, messageIds));
       },
     };
     this.service = new TelegramService({
@@ -156,6 +161,10 @@ export class TelegramAdapter {
 
   private async checkReviewChannel(botId: number): Promise<void> {
     const { log, reviewChannelId } = this.options;
+    if (reviewChannelId === undefined) {
+      log.info('no review channel: submissions are taken in the group and linked in place');
+      return;
+    }
     try {
       const chat = await this.bot.api.getChat(reviewChannelId);
       const member = await this.bot.api.getChatMember(reviewChannelId, botId);

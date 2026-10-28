@@ -22,8 +22,11 @@ export interface TelegramServiceDeps {
   matcher: QuestMatcher;
   writer: Pick<SheetWriter, 'record' | 'has'>;
   api: TelegramApiPort;
-  /** The private channel's ID as Telegram gives it: -100 followed by digits. */
-  reviewChannelId: string;
+  /**
+   * The private channel's ID as Telegram gives it: -100 followed by digits. Without one,
+   * a post in the group is linked in place and a private chat is asked to post in the group.
+   */
+  reviewChannelId?: string | undefined;
   /** After this moment submissions are answered, not logged. */
   campaignEnd?: Date | undefined;
   /** Groups where submissions are posted in the group itself. Any other group is ignored. */
@@ -78,6 +81,11 @@ export class TelegramService {
     // Once the campaign is over nobody is invited to submit: the instructions would only lead to "ended".
     if (command?.name === 'start') return this.say(message.chatId, this.ended(message) ? this.deps.config.replies.ended : telegram.welcome);
     if (command?.name === 'help') return this.say(message.chatId, this.ended(message) ? this.deps.config.replies.ended : this.helpText);
+
+    // No review channel means no way to keep evidence from a private chat: submissions are taken in the group.
+    if (this.deps.reviewChannelId === undefined) {
+      return this.say(message.chatId, this.ended(message) ? this.deps.config.replies.ended : telegram.replies.useGroup);
+    }
 
     if (message.images.length > 0) {
       if (message.mediaGroupId === undefined) await this.submitImages([message]);
@@ -151,7 +159,7 @@ export class TelegramService {
    * so the evidence is not lost.
    */
   private async copyLatePart(message: TgMessage): Promise<void> {
-    if (this.ended(message)) return;
+    if (this.ended(message) || this.deps.reviewChannelId === undefined) return;
     const { api, log } = this.deps;
     log.info('a photo arrived after its album was logged; copying it to the review channel only', { chat: message.chatId });
     await api.copyMoreToReview({ fromChatId: message.chatId, messageIds: [message.messageId] }).catch((err: unknown) => {
@@ -249,6 +257,8 @@ export class TelegramService {
     const [firstId, ...rest] = messageIds;
     const fallback = `tg-dm:${message.chatId}/${firstId ?? message.messageId}`;
     if (firstId === undefined) return fallback;
+    // No review channel: the member's own post in the group is the evidence, so link to it.
+    if (reviewChannelId === undefined) return groupPostLink(message.chatId, firstId);
     try {
       const copied = await api.copyToReview({
         fromChatId: message.chatId,
@@ -297,6 +307,11 @@ function channelNameOf(message: TgMessage): string {
 /** t.me/c/<channel>/<message>: a private channel's ID minus its -100 prefix. */
 export function reviewLink(channelId: string, messageId: number): string {
   return `https://t.me/c/${channelId.replace(/^-100/, '')}/${messageId}`;
+}
+
+/** t.me/c/<group>/<message>: a supergroup's ID minus its -100 prefix. Opens for anyone who is in the group. */
+export function groupPostLink(chatId: number, messageId: number): string {
+  return `https://t.me/c/${String(chatId).replace(/^-100/, '')}/${messageId}`;
 }
 
 /** What the review channel shows next to a copied submission. */

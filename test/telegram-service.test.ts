@@ -38,6 +38,7 @@ telegram:
     unmatched: "No match. Saved."
     no_caption: "Saved. Add a caption."
     no_image: "Attach a screenshot."
+    use_group: "Post it in the group."
     ugc_logged: "Logged your link."
     error: "Something broke."
 `,
@@ -60,6 +61,8 @@ function memoryLogger() {
 interface Options {
   end?: Date;
   groups?: number[];
+  /** Run without a review channel: group posts are linked in place. */
+  noChannel?: boolean;
   record?: (entry: WalEntry) => boolean;
   copy?: (args: { fromChatId: number; messageId: number; caption: string }) => Promise<number>;
   copyMore?: (args: { fromChatId: number; messageIds: number[] }) => Promise<void>;
@@ -103,7 +106,7 @@ function setup(options: Options = {}) {
       },
     },
     api,
-    reviewChannelId: REVIEW_CHANNEL,
+    reviewChannelId: options.noChannel ? undefined : REVIEW_CHANNEL,
     campaignEnd: options.end,
     groupIds: options.groups,
     log,
@@ -261,6 +264,56 @@ describe('posting in the community group', () => {
     await t.service.handle(text('hello', inGroup({ date: late })));
     expect(t.sent.map((s) => s.text)).toEqual(['Season over.']);
     expect(t.recorded).toHaveLength(0);
+  });
+});
+
+describe('without a review channel (group posts only)', () => {
+  const GROUP = -1005550001;
+  const inGroup = (overrides: Partial<TgMessage> = {}): Partial<TgMessage> => ({ chatId: GROUP, chatType: 'supergroup', ...overrides });
+
+  it('links the row to the member\'s own post in the group, and copies nothing', async () => {
+    const t = setup({ groups: [GROUP], noChannel: true });
+    const m = photo('share post', inGroup({ messageId: 4242 }));
+    await t.service.handle(m);
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.submissions()[0]).toMatchObject({
+      message_link: 'https://t.me/c/5550001/4242',
+      channel_name: 'telegram_group',
+      uid: '',
+      bound: false,
+      platform: 'telegram',
+    });
+    expect(t.copies).toHaveLength(0);
+    expect(t.more).toHaveLength(0);
+    expect(t.sent).toEqual([{ chatId: GROUP, text: 'Done: Share Post. Cheers!', replyTo: 4242 }]);
+  });
+
+  it('links an album to its first photo', async () => {
+    vi.useFakeTimers();
+    const t = setup({ groups: [GROUP], noChannel: true });
+    await t.service.handle(photo('boost post', inGroup({ messageId: 6001, mediaGroupId: 'g1' })));
+    await t.service.handle(photo(undefined, inGroup({ messageId: 6002, mediaGroupId: 'g1' })));
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.submissions()[0]?.message_link).toBe('https://t.me/c/5550001/6001');
+    expect(t.more).toHaveLength(0);
+  });
+
+  it('asks a private chat to post in the group, logging nothing', async () => {
+    const t = setup({ groups: [GROUP], noChannel: true });
+    await t.service.handle(photo('share post'));
+    await t.service.handle(text('https://example.com/x'));
+    await t.service.handle(text('share post'));
+    expect(t.replies()).toEqual(['Post it in the group.', 'Post it in the group.', 'Post it in the group.']);
+    expect(t.recorded).toHaveLength(0);
+    expect(t.copies).toHaveLength(0);
+  });
+
+  it('still answers /start and /help in private, and "ended" after the campaign', async () => {
+    const t = setup({ groups: [GROUP], noChannel: true, end: new Date('2026-11-22T23:59:59Z') });
+    await t.service.handle(command('start'));
+    await t.service.handle(photo('share post', { date: new Date('2026-11-23T00:00:00Z') }));
+    expect(t.replies()).toEqual(['Welcome!', 'Season over.']);
   });
 });
 

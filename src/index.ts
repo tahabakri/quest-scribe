@@ -72,7 +72,7 @@ async function main(): Promise<void> {
 
   const adapter = new TelegramAdapter({
     token: telegramEnv.token,
-    reviewChannelId: telegramEnv.reviewChannelId,
+    reviewChannelId: telegramEnv.reviewChannelId, // may be unset: group posts are then linked in place
     apiRoot: telegramEnv.apiRoot,
     config,
     matcher: new QuestMatcher(config.quests, config.fuzzyThreshold),
