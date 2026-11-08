@@ -36,6 +36,8 @@ export class FakeTelegram {
   reviewChannelId = -1001234567890;
   /** Whether getChatMember says the bot may post there. */
   botCanPost = true;
+  /** Users that getChatMember reports as administrators (the bot itself is governed by `botCanPost`). */
+  groupAdmins = new Set<number>();
 
   constructor(token: string) {
     this.token = token;
@@ -119,12 +121,19 @@ export class FakeTelegram {
         return ok(true);
       case 'getChat':
         return ok({ id: this.reviewChannelId, type: 'channel', title: 'Review Channel' });
-      case 'getChatMember':
+      case 'getChatMember': {
+        const userId = Number(payload.user_id);
+        // Anyone but the bot is an ordinary member, unless a test made them an admin of the group.
+        if (userId !== this.botId) {
+          const admin = this.groupAdmins.has(userId);
+          return ok({ status: admin ? 'administrator' : 'member', user: { id: userId, is_bot: false, first_name: 'Member' } });
+        }
         return ok(
           this.botCanPost
             ? { status: 'administrator', user: { id: this.botId, is_bot: true, first_name: 'Quest Test' }, can_post_messages: true }
             : { status: 'member', user: { id: this.botId, is_bot: true, first_name: 'Quest Test' } },
         );
+      }
       case 'sendMessage': {
         const chatId = Number(payload.chat_id);
         this.sent.push({ chatId, text: String(payload.text) });

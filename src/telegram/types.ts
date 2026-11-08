@@ -44,6 +44,8 @@ export interface TgMessage {
 export interface TelegramApiPort {
   /** `replyTo` makes the message a reply to that message (used in groups, so it is clear who it is for). */
   sendMessage(chatId: number, text: string, replyTo?: number): Promise<void>;
+  /** True when the user is the owner or an administrator of the chat. */
+  isChatAdmin(chatId: number, userId: number): Promise<boolean>;
   /** Copies a message into the review channel, with a new caption. Returns the copy's message id. */
   copyToReview(args: { fromChatId: number; messageId: number; caption: string }): Promise<number>;
   /** Copies further messages (the rest of an album) into the review channel, keeping their captions. */

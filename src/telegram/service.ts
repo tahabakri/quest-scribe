@@ -16,6 +16,7 @@ export const TELEGRAM_CHANNEL_NAME = 'telegram_dm';
 export const TELEGRAM_GROUP_CHANNEL_NAME = 'telegram_group';
 
 const CAPTION_LIMIT = 1024;
+const ADMIN_CACHE_MS = 10 * 60 * 1000;
 
 export interface TelegramServiceDeps {
   config: Pick<AppConfig, 'quests' | 'replies' | 'telegram'>;
@@ -102,15 +103,38 @@ export class TelegramService {
    */
   private async groupMessage(message: TgMessage): Promise<void> {
     if (message.chatType === 'channel' || !this.groups.has(message.chatId)) return;
-    if (message.images.length > 0) {
+    const hasImage = message.images.length > 0;
+    const text = message.text ?? '';
+    if (!hasImage && (message.command !== undefined || this.deps.matcher.match(text).kind === 'none')) return;
+    // Admins run the group: they are staff, not entrants, so the bot neither logs nor answers them.
+    if (await this.isIgnoredAdmin(message)) return;
+    if (hasImage) {
       if (message.mediaGroupId === undefined) await this.submitImages([message]);
       else if (this.albums.add(message) === 'late') await this.copyLatePart(message);
       return;
     }
-    const text = message.text ?? '';
-    if (message.command !== undefined || this.deps.matcher.match(text).kind === 'none') return;
     if (this.ended(message)) return this.say(message.chatId, this.deps.config.replies.ended, message.messageId);
     await this.say(message.chatId, this.deps.config.telegram.replies.noImage, message.messageId);
+  }
+
+  private readonly adminCache = new Map<string, { admin: boolean; until: number }>();
+
+  /** Asks Telegram whether the sender is a group admin, and remembers the answer for ten minutes. A failed lookup counts as "not an admin". */
+  private async isIgnoredAdmin(message: TgMessage): Promise<boolean> {
+    if (!this.deps.config.telegram.ignoreAdmins || message.fromId === undefined) return false;
+    const key = `${message.chatId}:${message.fromId}`;
+    const now = Date.now();
+    const known = this.adminCache.get(key);
+    if (known !== undefined && known.until > now) return known.admin;
+    try {
+      const admin = await this.deps.api.isChatAdmin(message.chatId, message.fromId);
+      if (this.adminCache.size >= 5000) this.adminCache.clear();
+      this.adminCache.set(key, { admin, until: now + ADMIN_CACHE_MS });
+      return admin;
+    } catch (err) {
+      this.deps.log.warn('could not check whether a group member is an admin', { chat: message.chatId, err });
+      return false;
+    }
   }
 
   /** A message with no image: a link is a content submission, a quest name alone is a reminder, anything else gets help. */
@@ -175,8 +199,15 @@ export class TelegramService {
     const captioned = parts.find((p) => (p.caption ?? '').trim() !== '');
     const caption = captioned?.caption ?? '';
 
-    const replyTo = first.chatType === 'private' ? undefined : first.messageId;
-    if (this.ended(first)) return this.say(first.chatId, config.replies.ended, replyTo);
+    // In the public group the bot only speaks up for a recognised quest name. A photo with no caption
+    // is ordinary chat, and after the campaign only a real submission is told it ended.
+    const inGroup = first.chatType !== 'private';
+    const replyTo = inGroup ? first.messageId : undefined;
+    if (inGroup && caption.trim() === '') return;
+    if (this.ended(first)) {
+      if (inGroup && matcher.match(caption).kind === 'none') return;
+      return this.say(first.chatId, config.replies.ended, replyTo);
+    }
 
     const outcome = classifyImageMessage({ text: caption, hasImage: true }, matcher);
     if (outcome.action !== 'log') return;
@@ -210,6 +241,8 @@ export class TelegramService {
     );
     if (!this.record(first.chatId, id, row)) return await this.say(first.chatId, config.telegram.replies.error, replyTo);
 
+    // A caption that names no quest (one word of a two-word name) is still saved for a person to look at, but quietly.
+    if (inGroup && outcome.reaction !== 'success') return;
     const { replies } = config.telegram;
     const text =
       caption.trim() === ''

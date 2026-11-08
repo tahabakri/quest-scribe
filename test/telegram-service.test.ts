@@ -63,6 +63,10 @@ interface Options {
   groups?: number[];
   /** Run without a review channel: group posts are linked in place. */
   noChannel?: boolean;
+  /** Telegram user ids that are admins of every group. */
+  admins?: number[];
+  /** Makes the admin lookup fail. */
+  adminLookupFails?: boolean;
   record?: (entry: WalEntry) => boolean;
   copy?: (args: { fromChatId: number; messageId: number; caption: string }) => Promise<number>;
   copyMore?: (args: { fromChatId: number; messageIds: number[] }) => Promise<void>;
@@ -77,7 +81,13 @@ function setup(options: Options = {}) {
   const recorded: WalEntry[] = [];
   const known = new Set<string>();
   let reviewId = 700;
+  let adminLookups = 0;
   const api: TelegramApiPort = {
+    isChatAdmin: (_chatId, userId) => {
+      adminLookups++;
+      if (options.adminLookupFails) return Promise.reject(new Error('telegram down'));
+      return Promise.resolve((options.admins ?? []).includes(userId));
+    },
     sendMessage: async (chatId, text, replyTo) => {
       if (options.send) await options.send(chatId, text);
       sent.push(replyTo === undefined ? { chatId, text } : { chatId, text, replyTo });
@@ -114,7 +124,7 @@ function setup(options: Options = {}) {
   });
   const submissions = () => recorded.filter((e) => e.kind === 'submission').map((e) => e.row);
   const replies = () => sent.map((s) => s.text);
-  return { service, sent, copies, more, recorded, submissions, replies, lines };
+  return { service, sent, copies, more, recorded, submissions, replies, lines, lookups: () => adminLookups };
 }
 
 let seq = 0;
@@ -262,8 +272,94 @@ describe('posting in the community group', () => {
     const late = new Date('2026-11-23T00:00:00Z');
     await t.service.handle(photo('share post', inGroup({ date: late })));
     await t.service.handle(text('hello', inGroup({ date: late })));
+    await t.service.handle(photo('lunch', inGroup({ date: late })));
+    await t.service.handle(photo(undefined, inGroup({ date: late })));
     expect(t.sent.map((s) => s.text)).toEqual(['Season over.']);
     expect(t.recorded).toHaveLength(0);
+  });
+
+  it('saves a caption that names no quest, such as one word of it, but does not answer', async () => {
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(photo('share', inGroup()));
+    await t.service.handle(photo('look at my cat', inGroup()));
+    expect(t.submissions().map((r) => r.quest_type)).toEqual(['unmatched', 'unmatched']);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('ignores a photo with no caption: it is chat, not a submission', async () => {
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(photo(undefined, inGroup()));
+    expect(t.recorded).toHaveLength(0);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('still answers a typo of a quest name, and flags the row', async () => {
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(photo('shre post', inGroup()));
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'share_post', fuzzy_match: true });
+    expect(t.replies()).toEqual(['Done: Share Post. Cheers!']);
+  });
+});
+
+describe('group admins', () => {
+  const GROUP = -100555;
+  const ADMIN = 7000;
+  const inGroup = (overrides: Partial<TgMessage> = {}): Partial<TgMessage> => ({ chatId: GROUP, chatType: 'supergroup', ...overrides });
+
+  it('are neither logged nor answered, for photos, albums and a quest name in text', async () => {
+    vi.useFakeTimers();
+    const t = setup({ groups: [GROUP], admins: [ADMIN] });
+    await t.service.handle(photo('share post', inGroup({ fromId: ADMIN })));
+    await t.service.handle(photo('boost post', inGroup({ fromId: ADMIN, messageId: 8001, mediaGroupId: 'adm' })));
+    await t.service.handle(photo(undefined, inGroup({ fromId: ADMIN, messageId: 8002, mediaGroupId: 'adm' })));
+    await t.service.handle(text('I did the share post', inGroup({ fromId: ADMIN })));
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(t.recorded).toHaveLength(0);
+    expect(t.sent).toHaveLength(0);
+    expect(t.copies).toHaveLength(0);
+  });
+
+  it('do not stop other members being logged and answered', async () => {
+    const t = setup({ groups: [GROUP], admins: [ADMIN] });
+    await t.service.handle(photo('share post', inGroup({ fromId: ADMIN })));
+    await t.service.handle(photo('share post', inGroup({ fromId: USER })));
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.submissions()[0]).toMatchObject({ user_id: String(USER) });
+    expect(t.replies()).toEqual(['Done: Share Post. Cheers!']);
+  });
+
+  it('are asked about once, not on every message', async () => {
+    const t = setup({ groups: [GROUP], admins: [ADMIN] });
+    for (let i = 0; i < 4; i++) await t.service.handle(photo('share post', inGroup({ fromId: ADMIN })));
+    for (let i = 0; i < 3; i++) await t.service.handle(photo('lunch', inGroup({ fromId: USER })));
+    expect(t.lookups()).toBe(2);
+  });
+
+  it('are not looked up for ordinary chat, and not at all when the rule is off', async () => {
+    const t = setup({ groups: [GROUP], admins: [ADMIN] });
+    await t.service.handle(text('good morning', inGroup({ fromId: ADMIN })));
+    expect(t.lookups()).toBe(0);
+
+    const off = parseConfig(
+      { origin: 'test', text: `quests:\n  - keyword: share post\n    type: share_post\n    name: Share Post\ntelegram:\n  ignore_admins: false\n` },
+      {},
+    );
+    expect(off.telegram.ignoreAdmins).toBe(false);
+    expect(config.telegram.ignoreAdmins).toBe(true);
+  });
+
+  it('are treated as members when Telegram cannot say, so nobody is lost', async () => {
+    const t = setup({ groups: [GROUP], admins: [ADMIN], adminLookupFails: true });
+    await t.service.handle(photo('share post', inGroup({ fromId: ADMIN })));
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.lines.some((l) => l.level === 'warn' && l.message.includes('admin'))).toBe(true);
+  });
+
+  it('are only checked in groups: a private chat is not affected', async () => {
+    const t = setup({ admins: [USER] });
+    await t.service.handle(photo('share post'));
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.lookups()).toBe(0);
   });
 });
 

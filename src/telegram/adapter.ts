@@ -72,6 +72,10 @@ export class TelegramAdapter {
           this.bot.api.sendMessage(chatId, text, replyTo === undefined ? {} : { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } }),
         );
       },
+      isChatAdmin: async (chatId, userId) => {
+        const member = await again(() => this.bot.api.getChatMember(chatId, userId));
+        return member.status === 'creator' || member.status === 'administrator';
+      },
       copyToReview: async ({ fromChatId, messageId, caption }) =>
         (await again(() => this.bot.api.copyMessage(reviewChannel(), fromChatId, messageId, { caption }))).message_id,
       copyMoreToReview: async ({ fromChatId, messageIds }) => {

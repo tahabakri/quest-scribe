@@ -220,6 +220,18 @@ describe('TelegramAdapter against a fake Bot API', () => {
     expect(call).toMatchObject({ chat_id: -100777, reply_parameters: { message_id: (post as { message_id: number }).message_id } });
   });
 
+  it('does not log or answer a group admin, checking with Telegram who is one', async () => {
+    fake.groupAdmins.add(USER);
+    await create({ groupIds: [-100777] }).start();
+    const group = { id: -100777, type: 'supergroup', title: 'Global' };
+    fake.push(base(group, { caption: 'share post', photo: [{ file_id: 'ga', file_unique_id: 'ga', width: 800, height: 800 }] }));
+    fake.push(command('help')); // a sentinel: once it is answered, the admin's post was handled
+    await waitFor(() => fake.sent.some((s) => s.text.includes('Quest names')), 'the sentinel reply');
+    expect(fake.sent).toHaveLength(1);
+    expect(recorded).toHaveLength(0);
+    expect(fake.callsOf('getChatMember').some((c) => c.payload.chat_id === -100777 && c.payload.user_id === USER)).toBe(true);
+  });
+
   it('never acts on an edited message', async () => {
     await create().start();
     fake.push(dm({ caption: 'share post', photo: [{ file_id: 'e', file_unique_id: 'e', width: 1, height: 1 }], edit_date: 1 }), 'edited_message');

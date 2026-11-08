@@ -59,6 +59,8 @@ const TelegramSchema = z.strictObject({
   help_quests_heading: z.string().trim().min(1).max(200).default('Quest names, to use as the caption:'),
   /** quest_type for a message that contains a link and no image. */
   link_quest_type: questType.default('content_link'),
+  /** In a group, group admins are not campaign participants: the bot neither logs nor answers them. */
+  ignore_admins: z.boolean().default(true),
   replies: z
     .strictObject({
       /** {quest} is replaced with the quest's name. */
@@ -153,6 +155,7 @@ export interface AppConfig {
     welcome: string;
     helpQuestsHeading: string;
     linkQuestType: string;
+    ignoreAdmins: boolean;
     replies: {
       /** {quest} stands for the quest's name. */
       logged: string;
@@ -324,6 +327,7 @@ function toAppConfig(raw: RawConfig): AppConfig {
       welcome: raw.telegram.welcome,
       helpQuestsHeading: raw.telegram.help_quests_heading,
       linkQuestType: raw.telegram.link_quest_type,
+      ignoreAdmins: raw.telegram.ignore_admins,
       replies: {
         logged: raw.telegram.replies.logged,
         unmatched: raw.telegram.replies.unmatched,

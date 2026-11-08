@@ -58,6 +58,7 @@ replies:
 #
 #     To share something you made, just send the link.
 #   help_quests_heading: 'Quest names, to use as the caption:'
+#   ignore_admins: true   # group admins are not logged or answered in the group; false logs them too (handy for testing)
 #   link_quest_type: content_link   # quest_type for a message with a link and no image
 #   replies:
 #     logged: 'Logged: {quest}. Thank you!'   # {quest} becomes the quest's name
