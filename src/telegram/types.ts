@@ -26,6 +26,7 @@ export interface TgMessage {
   /** When the member sent it. */
   date: Date;
   fromId: number | undefined;
+  /** True for anything that is not a person: a bot, a channel or anonymous-admin post, an automatic forward. */
   fromIsBot: boolean;
   /** "@handle", or the first name when the member has no handle. */
   username: string;

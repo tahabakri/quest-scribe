@@ -107,7 +107,10 @@ export class TelegramService {
     const text = message.text ?? '';
     if (!hasImage && (message.command !== undefined || this.deps.matcher.match(text).kind === 'none')) return;
     // Admins run the group: they are staff, not entrants, so the bot neither logs nor answers them.
-    if (await this.isIgnoredAdmin(message)) return;
+    if (await this.isIgnoredAdmin(message)) {
+      this.deps.log.info('ignored a post from a group admin', { chat: message.chatId, user: message.fromId });
+      return;
+    }
     if (hasImage) {
       if (message.mediaGroupId === undefined) await this.submitImages([message]);
       else if (this.albums.add(message) === 'late') await this.copyLatePart(message);

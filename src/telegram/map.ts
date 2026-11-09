@@ -3,6 +3,9 @@ import { isImageAttachment } from '../submissions.js';
 import { parseCommand } from './parse.js';
 import type { TgEntity, TgImage, TgMessage } from './types.js';
 
+/** The account Telegram itself posts from, e.g. a channel's posts copied into its discussion group. */
+const TELEGRAM_SERVICE_ACCOUNT_ID = 777000;
+
 /**
  * Turns a Telegram message into the bot's own small model. A photo, or a file whose
  * type or name says it is an image (png, jpg, jpeg, gif, webp by default), counts as
@@ -29,7 +32,13 @@ export function toTgMessage(
     messageId: message.message_id,
     date: new Date(message.date * 1000),
     fromId: from?.id,
-    fromIsBot: from?.is_bot ?? false,
+    // Not a person: a bot, a post made on behalf of a channel or of the group itself (anonymous admins),
+    // or the copy Telegram's own service account (777000) makes of the linked channel's posts.
+    fromIsBot:
+      (from?.is_bot ?? false) ||
+      from?.id === TELEGRAM_SERVICE_ACCOUNT_ID ||
+      message.sender_chat !== undefined ||
+      message.is_automatic_forward === true,
     username: from === undefined ? '' : from.username !== undefined ? `@${from.username}` : from.first_name,
     text: message.text,
     caption: message.caption,

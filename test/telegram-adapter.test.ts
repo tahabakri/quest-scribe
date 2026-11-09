@@ -232,6 +232,19 @@ describe('TelegramAdapter against a fake Bot API', () => {
     expect(fake.callsOf('getChatMember').some((c) => c.payload.chat_id === -100777 && c.payload.user_id === USER)).toBe(true);
   });
 
+  it('ignores the channel posts Telegram copies into the group, and posts made on behalf of a channel', async () => {
+    await create({ groupIds: [-100777] }).start();
+    const group = { id: -100777, type: 'supergroup', title: 'Global' };
+    const pic = [{ file_id: 'cp', file_unique_id: 'cp', width: 800, height: 800 }];
+    fake.push(base(group, { caption: 'share post', photo: pic, from: { id: 777000, is_bot: false, first_name: 'Telegram' }, is_automatic_forward: true }));
+    fake.push(base(group, { caption: 'share post', photo: pic, sender_chat: { id: -100999, type: 'channel', title: 'News' }, from: { id: 1087968824, is_bot: true, first_name: 'Group' } }));
+    fake.push(base(group, { caption: 'share post', photo: pic, from: { id: 777000, is_bot: false, first_name: 'Telegram' } }));
+    fake.push(command('help')); // a sentinel
+    await waitFor(() => fake.sent.some((s) => s.text.includes('Quest names')), 'the sentinel reply');
+    expect(fake.sent).toHaveLength(1);
+    expect(recorded).toHaveLength(0);
+  });
+
   it('never acts on an edited message', async () => {
     await create().start();
     fake.push(dm({ caption: 'share post', photo: [{ file_id: 'e', file_unique_id: 'e', width: 1, height: 1 }], edit_date: 1 }), 'edited_message');
