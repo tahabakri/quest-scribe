@@ -43,7 +43,7 @@ export interface TelegramServiceDeps {
  * a bad message is logged and answered, it cannot stop the bot.
  *
  * Members submit in a private chat with the bot, or in the community group(s) named in
- * `groupIds`, where the bot reacts only to photos (and to a quest name without a photo) and
+ * `groupIds`, where the bot reacts only to photos (and to text for the quests listed as text-only) and
  * stays silent on ordinary chat. Any other group is ignored. There is no /bind
  * here: members link their account ID once in the separate campaign bot, which this
  * bot cannot see, so every row it writes has uid blank and bound = FALSE.
@@ -98,26 +98,64 @@ export class TelegramService {
 
   /**
    * A message in the community group. Only the configured group counts, and the bot is quiet
-   * unless the member is clearly submitting: a photo, or a quest name without a photo. Chat,
+   * unless the member is clearly submitting: a photo, or text for a text-only quest. Chat,
    * commands and links on their own are left alone, so the group stays readable.
    */
   private async groupMessage(message: TgMessage): Promise<void> {
     if (message.chatType === 'channel' || !this.groups.has(message.chatId)) return;
-    const hasImage = message.images.length > 0;
-    const text = message.text ?? '';
-    if (!hasImage && (message.command !== undefined || this.deps.matcher.match(text).kind === 'none')) return;
+    if (message.images.length === 0) return this.groupText(message);
     // Admins run the group: they are staff, not entrants, so the bot neither logs nor answers them.
-    if (await this.isIgnoredAdmin(message)) {
-      this.deps.log.info('ignored a post from a group admin', { chat: message.chatId, user: message.fromId });
-      return;
-    }
-    if (hasImage) {
-      if (message.mediaGroupId === undefined) await this.submitImages([message]);
-      else if (this.albums.add(message) === 'late') await this.copyLatePart(message);
-      return;
-    }
-    if (this.ended(message)) return this.say(message.chatId, this.deps.config.replies.ended, message.messageId);
-    await this.say(message.chatId, this.deps.config.telegram.replies.noImage, message.messageId);
+    if (await this.skipAdmin(message)) return;
+    if (message.mediaGroupId === undefined) await this.submitImages([message]);
+    else if (this.albums.add(message) === 'late') await this.copyLatePart(message);
+  }
+
+  /**
+   * Text in the group. Short everyday words can be quest keywords, so a quest name in plain chat is just chat and the bot stays silent
+   * unless the text names a quest that is done with text alone (`telegram.text_quest_types`,
+   * such as a question for a live session). Anything else, including a quest name without a
+   * photo, is left alone: reminding people would answer half the conversation.
+   */
+  private async groupText(message: TgMessage): Promise<void> {
+    if (message.command !== undefined) return;
+    const text = message.text ?? '';
+    const match = this.deps.matcher.match(text);
+    if (match.kind === 'none' || !this.deps.config.telegram.textQuestTypes.includes(match.type)) return;
+    // A short whole-word ("strict") keyword is too common in chat: in text it counts only as a hashtag (#join).
+    const strict = this.deps.config.quests.some((quest) => quest.keyword === match.keyword && quest.strict === true);
+    if (strict && !hasHashtag(text, match.keyword)) return;
+    if (await this.skipAdmin(message)) return;
+
+    const { config } = this.deps;
+    if (this.ended(message)) return this.say(message.chatId, config.replies.ended, message.messageId);
+    const id = `tg:sub:${message.chatId}:${message.messageId}`;
+    if (this.deps.writer.has(id)) return; // delivered twice
+
+    const fuzzy = match.kind === 'fuzzy' || match.review === true;
+    const messageLink = await this.copyToReview(message, [message.messageId], { questType: match.type, fuzzy, text });
+    const row = buildSubmissionRow(
+      {
+        createdAt: message.date,
+        authorId: String(message.fromId),
+        authorUsername: message.username,
+        channelName: channelNameOf(message),
+        content: text,
+        url: messageLink,
+      },
+      { platform: 'telegram', questType: match.type, fuzzy, attachmentUrl: '', linkUrl: firstLinkIn(text, message.entities) ?? '' },
+    );
+    if (!this.record(message.chatId, id, row)) return await this.say(message.chatId, config.telegram.replies.error, message.messageId);
+    await this.say(
+      message.chatId,
+      config.telegram.replies.logged.replaceAll('{quest}', questNameFor(config.quests, match.type)),
+      message.messageId,
+    );
+  }
+
+  private async skipAdmin(message: TgMessage): Promise<boolean> {
+    if (!(await this.isIgnoredAdmin(message))) return false;
+    this.deps.log.info('ignored a post from a group admin', { chat: message.chatId, user: message.fromId });
+    return true;
   }
 
   private readonly adminCache = new Map<string, { admin: boolean; until: number }>();
@@ -334,6 +372,16 @@ export class TelegramService {
       if (chatId !== undefined) await this.say(chatId, this.deps.config.telegram.replies.error);
     }
   }
+}
+
+/** True when the text has `keyword` as a hashtag: "#join", or "#join_event" for a two-word keyword. */
+export function hasHashtag(text: string, keyword: string): boolean {
+  const escaped = keyword
+    .trim()
+    .split(/\s+/)
+    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('_?');
+  return new RegExp(`(^|[^\\p{L}\\p{N}_])#${escaped}(?![\\p{L}\\p{N}_])`, 'iu').test(text);
 }
 
 function channelNameOf(message: TgMessage): string {

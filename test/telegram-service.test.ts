@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseConfig } from '../src/config.js';
 import type { Logger } from '../src/logger.js';
 import { QuestMatcher } from '../src/matcher.js';
-import { TELEGRAM_CHANNEL_NAME, TelegramService, reviewCaption, reviewLink } from '../src/telegram/service.js';
+import { TELEGRAM_CHANNEL_NAME, TelegramService, hasHashtag, reviewCaption, reviewLink } from '../src/telegram/service.js';
 import type { TelegramApiPort, TgEntity, TgMessage } from '../src/telegram/types.js';
 import type { WalEntry } from '../src/wal.js';
 
@@ -33,6 +33,7 @@ replies: { ended: "Season over." }
 telegram:
   welcome: "Welcome!"
   link_quest_type: ugc
+  text_quest_types: [boost_post, event_join]
   replies:
     logged: "Done: {quest}. Cheers!"
     unmatched: "No match. Saved."
@@ -236,11 +237,81 @@ describe('posting in the community group', () => {
     expect(t.recorded).toHaveLength(0);
   });
 
-  it('reminds a member who names a quest without a photo, replying to them', async () => {
+  it('does not remind anyone about a screenshot: a quest name in plain chat is just chat', async () => {
     const t = setup({ groups: [GROUP] });
-    const m = text('I did the share post', inGroup());
+    await t.service.handle(text('I did the share post', inGroup()));
+    await t.service.handle(text('how do I join the event', inGroup()));
+    expect(t.sent).toHaveLength(0);
+    expect(t.recorded).toHaveLength(0);
+  });
+
+  it('logs a text-only quest from a text message, and replies to it', async () => {
+    const t = setup({ groups: [GROUP] });
+    const m = text('#BOOST POST can I ask something about the market?', inGroup({ messageId: 9001 }));
     await t.service.handle(m);
-    expect(t.sent).toEqual([{ chatId: GROUP, text: 'Attach a screenshot.', replyTo: m.messageId }]);
+    expect(t.submissions()).toHaveLength(1);
+    expect(t.submissions()[0]).toMatchObject({
+      quest_type: 'boost_post',
+      channel_name: 'telegram_group',
+      attachment_url: '',
+      uid: '',
+      bound: false,
+      user_id: String(USER),
+      message_text: '#BOOST POST can I ask something about the market?',
+    });
+    expect(t.sent).toEqual([{ chatId: GROUP, text: 'Done: Boost Post. Cheers!', replyTo: 9001 }]);
+  });
+
+  it('ignores a short strict keyword in text unless it is a hashtag', async () => {
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(text('join', inGroup()));
+    await t.service.handle(text('can I join the event', inGroup()));
+    await t.service.handle(text('I like the #joined list', inGroup()));
+    expect(t.recorded).toHaveLength(0);
+    expect(t.sent).toHaveLength(0);
+    await t.service.handle(text('#JOIN can I ask something?', inGroup()));
+    expect(t.submissions().map((r) => r.quest_type)).toEqual(['event_join']);
+  });
+
+  it('reads hashtags exactly', () => {
+    expect(hasHashtag('#JOIN hello', 'join')).toBe(true);
+    expect(hasHashtag('hello #join', 'join')).toBe(true);
+    expect(hasHashtag('hello #join!', 'join')).toBe(true);
+    expect(hasHashtag('a join', 'join')).toBe(false);
+    expect(hasHashtag('#joins', 'join')).toBe(false);
+    expect(hasHashtag('a#join', 'join')).toBe(false);
+    expect(hasHashtag('#join_event', 'join event')).toBe(true);
+    expect(hasHashtag('#joinevent', 'join event')).toBe(true);
+  });
+
+  it('logs a text-only quest once, even if Telegram delivers it twice', async () => {
+    const t = setup({ groups: [GROUP] });
+    const m = text('boost post question', inGroup({ messageId: 9002 }));
+    await t.service.handle(m);
+    await t.service.handle(m);
+    expect(t.submissions()).toHaveLength(1);
+  });
+
+  it('does not log a text-only quest from an admin, from a command, or after the campaign', async () => {
+    const t = setup({ groups: [GROUP], admins: [7000], end: new Date('2026-11-22T23:59:59Z') });
+    await t.service.handle(text('boost post question', inGroup({ fromId: 7000 })));
+    await t.service.handle(command('boost', 'post', inGroup()));
+    await t.service.handle(text('boost post question', inGroup({ date: new Date('2026-11-23T00:00:00Z') })));
+    expect(t.recorded).toHaveLength(0);
+    expect(t.replies()).toEqual(['Season over.']);
+  });
+
+  it('does not log a text-only quest in a private chat', async () => {
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(text('boost post question'));
+    expect(t.recorded).toHaveLength(0);
+  });
+
+  it('copies a text-only quest to the review channel when there is one', async () => {
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(text('boost post question', inGroup({ messageId: 9003 })));
+    expect(t.copies[0]).toMatchObject({ fromChatId: GROUP, messageId: 9003 });
+    expect(t.submissions()[0]?.message_link).toMatch(/^https:\/\/t\.me\/c\/1234567890\//);
   });
 
   it('ignores every other group, and channels', async () => {

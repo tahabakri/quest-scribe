@@ -60,6 +60,7 @@ replies:
 #   help_quests_heading: 'Quest names, to use as the caption:'
 #   ignore_admins: true   # group admins are not logged or answered in the group; false logs them too (handy for testing)
 #   link_quest_type: content_link   # quest_type for a message with a link and no image
+#   text_quest_types: []   # quest types done with text alone in the group, e.g. [live_session_question]; a photo is not needed for these
 #   replies:
 #     logged: 'Logged: {quest}. Thank you!'   # {quest} becomes the quest's name
 #     unmatched: "We couldn't match that to a quest, so we've saved it for a person to review. Next time, put the quest name in the caption."

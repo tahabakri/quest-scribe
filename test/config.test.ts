@@ -44,6 +44,19 @@ describe('config', () => {
     expect(config.sheets.flushMaxRows).toBe(20);
   });
 
+  it('reads the Telegram admin and text-only settings, with safe defaults', () => {
+    const defaults = parse(MINIMAL);
+    expect(defaults.telegram.ignoreAdmins).toBe(true);
+    expect(defaults.telegram.textQuestTypes).toEqual([]);
+    const set = parse(`${MINIMAL}telegram:\n  ignore_admins: false\n  text_quest_types: [daily_check_in]\n`);
+    expect(set.telegram.ignoreAdmins).toBe(false);
+    expect(set.telegram.textQuestTypes).toEqual(['daily_check_in']);
+  });
+
+  it('rejects a text-only quest type that no quest has', () => {
+    expect(configError(() => parse(`${MINIMAL}telegram:\n  text_quest_types: [daily_checkin]\n`))).toMatch(/"daily_checkin" is not the type of any quest/);
+  });
+
   it('reads the per-quest strict flag, off by default', () => {
     expect(parse(MINIMAL).quests[0]?.strict).toBe(false);
     const strict = parse(MINIMAL.replace('    type: daily_check_in', '    type: daily_check_in\n    strict: true'));

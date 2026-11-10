@@ -61,6 +61,8 @@ const TelegramSchema = z.strictObject({
   link_quest_type: questType.default('content_link'),
   /** In a group, group admins are not campaign participants: the bot neither logs nor answers them. */
   ignore_admins: z.boolean().default(true),
+  /** Quest types that are done with a text message and no photo (for example a question posted in the group). */
+  text_quest_types: z.array(questType).default([]),
   replies: z
     .strictObject({
       /** {quest} is replaced with the quest's name. */
@@ -116,6 +118,12 @@ const RawConfigSchema = z
         nameByType.set(quest.type, quest.name);
       }
     });
+    const types = new Set(cfg.quests.map((quest) => quest.type));
+    cfg.telegram.text_quest_types.forEach((type, i) => {
+      if (!types.has(type)) {
+        ctx.addIssue({ code: 'custom', path: ['telegram', 'text_quest_types', i], message: `"${type}" is not the type of any quest` });
+      }
+    });
     // /help is one Telegram message: the welcome text plus the list of quest names.
     const help = buildHelpText(cfg.telegram.welcome, cfg.telegram.help_quests_heading, cfg.quests);
     if (help.length > TELEGRAM_MESSAGE_LIMIT) {
@@ -156,6 +164,7 @@ export interface AppConfig {
     helpQuestsHeading: string;
     linkQuestType: string;
     ignoreAdmins: boolean;
+    textQuestTypes: string[];
     replies: {
       /** {quest} stands for the quest's name. */
       logged: string;
@@ -328,6 +337,7 @@ function toAppConfig(raw: RawConfig): AppConfig {
       helpQuestsHeading: raw.telegram.help_quests_heading,
       linkQuestType: raw.telegram.link_quest_type,
       ignoreAdmins: raw.telegram.ignore_admins,
+      textQuestTypes: raw.telegram.text_quest_types,
       replies: {
         logged: raw.telegram.replies.logged,
         unmatched: raw.telegram.replies.unmatched,

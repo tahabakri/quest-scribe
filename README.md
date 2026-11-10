@@ -173,6 +173,7 @@ Everything deployment-specific lives in `config.yml`, which is gitignored. [`con
 | `telegram.welcome` | a generic welcome | The `/start` text. `/help` sends it plus the list of quest names (the first keyword of each quest that is not a `review` variant, in config order). The two together must fit one Telegram message (4096 characters). |
 | `telegram.help_quests_heading` | a generic heading | The line above the quest names in `/help`. |
 | `telegram.link_quest_type` | `content_link` | `quest_type` for a message with a link and no image. |
+| `telegram.text_quest_types` | none | Quest types that are done with a text message and no photo, such as a question for a live session. In the group, a text message that names one of them is logged (and answered with `logged`). Every other text message is left alone, so common words in a quest name never trigger a reply. Each type must belong to a quest. In text, a short `strict` keyword (a single common word) counts only as a hashtag, e.g. `#join`; a longer caption counts as written. |
 | `telegram.ignore_admins` | `true` | Group admins and the owner are neither logged nor answered in the group. `false` treats them like any member. |
 | `telegram.replies.*` | generic sentences | `logged` (`{quest}` becomes the quest's name), `unmatched`, `no_caption`, `no_image`, `use_group`, `ugc_logged`, `error`. Plain text, no formatting. |
 | `image_extensions` | `[png, jpg, jpeg, gif, webp]` | File types that count as a screenshot when sent as a file. |
