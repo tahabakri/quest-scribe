@@ -2,17 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseConfig } from '../src/config.js';
 import type { Logger } from '../src/logger.js';
 import { QuestMatcher } from '../src/matcher.js';
-import { TELEGRAM_CHANNEL_NAME, TelegramService, hasHashtag, reviewCaption, reviewLink } from '../src/telegram/service.js';
+import { TELEGRAM_CHANNEL_NAME, TelegramService, hasHashtag, hashtagFor, hashtagText, reviewCaption, reviewLink } from '../src/telegram/service.js';
 import type { TelegramApiPort, TgEntity, TgMessage } from '../src/telegram/types.js';
 import type { WalEntry } from '../src/wal.js';
 
 const REVIEW_CHANNEL = '-1001234567890';
 const USER = 5000;
 
-const config = parseConfig(
-  {
-    origin: 'test',
-    text: `
+const CONFIG_TEXT = `
 quests:
   - keyword: share post
     type: share_post
@@ -40,10 +37,13 @@ telegram:
     no_caption: "Saved. Add a caption."
     no_image: "Attach a screenshot."
     use_group: "Post it in the group."
+    use_hashtag: "Add {tag} please."
     ugc_logged: "Logged your link."
     error: "Something broke."
-`,
-  },
+`;
+const config = parseConfig({ origin: 'test', text: CONFIG_TEXT }, {});
+const hashtagConfig = parseConfig(
+  { origin: 'test', text: CONFIG_TEXT.replace('  text_quest_types:', '  require_hashtag: true\n  text_quest_types:') },
   {},
 );
 
@@ -65,6 +65,8 @@ interface Options {
   /** Run without a review channel: group posts are linked in place. */
   noChannel?: boolean;
   /** Telegram user ids that are admins of every group. */
+  /** Use the config where group quests need their hashtag. */
+  hashtags?: boolean;
   admins?: number[];
   /** Makes the admin lookup fail. */
   adminLookupFails?: boolean;
@@ -103,9 +105,10 @@ function setup(options: Options = {}) {
     },
   };
   const { log, lines } = memoryLogger();
+  const active = options.hashtags ? hashtagConfig : config;
   const service = new TelegramService({
-    config,
-    matcher: options.matcher ?? new QuestMatcher(config.quests, config.fuzzyThreshold),
+    config: active,
+    matcher: options.matcher ?? new QuestMatcher(active.quests, active.fuzzyThreshold),
     writer: {
       has: (id) => known.has(id),
       record: (entry) => {
@@ -369,6 +372,61 @@ describe('posting in the community group', () => {
     await t.service.handle(photo('shre post', inGroup()));
     expect(t.submissions()[0]).toMatchObject({ quest_type: 'share_post', fuzzy_match: true });
     expect(t.replies()).toEqual(['Done: Share Post. Cheers!']);
+  });
+});
+
+describe('hashtag mode in the group', () => {
+  const GROUP = -100555;
+  const inGroup = (overrides: Partial<TgMessage> = {}): Partial<TgMessage> => ({ chatId: GROUP, chatType: 'supergroup', ...overrides });
+
+  it('logs and answers a photo whose caption has the quest hashtag, in any spelling and case', async () => {
+    const t = setup({ groups: [GROUP], hashtags: true });
+    await t.service.handle(photo('#Share_Post done!', inGroup()));
+    await t.service.handle(photo('look #BOOST_POST', inGroup()));
+    expect(t.submissions().map((r) => r.quest_type)).toEqual(['share_post', 'boost_post']);
+    expect(t.submissions().map((r) => r.fuzzy_match)).toEqual([false, false]);
+    expect(t.replies()).toEqual(['Done: Share Post. Cheers!', 'Done: Boost Post. Cheers!']);
+  });
+
+  it('saves a plain quest name without the hashtag as unmatched, and tells the member the hashtag', async () => {
+    const t = setup({ groups: [GROUP], hashtags: true });
+    const m = photo('share post', inGroup({ messageId: 9100 }));
+    await t.service.handle(m);
+    expect(t.submissions().map((r) => r.quest_type)).toEqual(['unmatched']);
+    expect(t.sent).toEqual([{ chatId: GROUP, text: 'Add #share_post please.', replyTo: 9100 }]);
+  });
+
+  it('stays silent when the caption names no quest at all', async () => {
+    const t = setup({ groups: [GROUP], hashtags: true });
+    await t.service.handle(photo('#wagmi lunch', inGroup()));
+    expect(t.submissions().map((r) => r.quest_type)).toEqual(['unmatched']);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('flags a hashtag typo for review', async () => {
+    const t = setup({ groups: [GROUP], hashtags: true });
+    await t.service.handle(photo('#shre_post', inGroup()));
+    expect(t.submissions()[0]).toMatchObject({ quest_type: 'share_post', fuzzy_match: true });
+  });
+
+  it('needs the hashtag for text-only quests too', async () => {
+    const t = setup({ groups: [GROUP], hashtags: true });
+    await t.service.handle(text('boost post question', inGroup()));
+    expect(t.recorded).toHaveLength(0);
+    await t.service.handle(text('#boost_post question', inGroup()));
+    expect(t.submissions().map((r) => r.quest_type)).toEqual(['boost_post']);
+  });
+
+  it('does not change private chats or the default mode', async () => {
+    const t = setup({ groups: [GROUP] });
+    await t.service.handle(photo('share post', inGroup()));
+    expect(t.submissions().map((r) => r.quest_type)).toEqual(['share_post']);
+  });
+
+  it('reads hashtags and builds them', () => {
+    expect(hashtagText('hi #Join_Event, and #share!')).toBe('Join Event share');
+    expect(hashtagText('no tags here, C# is a language')).toBe('');
+    expect(hashtagFor('Join Event')).toBe('#join_event');
   });
 });
 

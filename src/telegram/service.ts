@@ -1,7 +1,7 @@
 import { hasEnded } from '../campaign.js';
 import type { AppConfig } from '../config.js';
 import { type Logger } from '../logger.js';
-import type { QuestMatcher } from '../matcher.js';
+import { type QuestMatcher, normalizeText } from '../matcher.js';
 import { buildHelpText, questNameFor } from '../quests.js';
 import type { SubmissionRow } from '../sheets/schema.js';
 import { buildSubmissionRow, classifyImageMessage } from '../submissions.js';
@@ -119,7 +119,7 @@ export class TelegramService {
   private async groupText(message: TgMessage): Promise<void> {
     if (message.command !== undefined) return;
     const text = message.text ?? '';
-    const match = this.deps.matcher.match(text);
+    const match = this.deps.matcher.match(this.deps.config.telegram.requireHashtag ? hashtagText(text) : text);
     if (match.kind === 'none' || !this.deps.config.telegram.textQuestTypes.includes(match.type)) return;
     // A short whole-word ("strict") keyword is too common in chat: in text it counts only as a hashtag (#join).
     const strict = this.deps.config.quests.some((quest) => quest.keyword === match.keyword && quest.strict === true);
@@ -245,12 +245,15 @@ export class TelegramService {
     const inGroup = first.chatType !== 'private';
     const replyTo = inGroup ? first.messageId : undefined;
     if (inGroup && caption.trim() === '') return;
+    // With require_hashtag, only the hashtags of a group caption are read: "#join" counts, "join" does not.
+    const hashtagsOnly = inGroup && config.telegram.requireHashtag;
+    const subject = hashtagsOnly ? hashtagText(caption) : caption;
     if (this.ended(first)) {
-      if (inGroup && matcher.match(caption).kind === 'none') return;
+      if (inGroup && matcher.match(subject).kind === 'none') return;
       return this.say(first.chatId, config.replies.ended, replyTo);
     }
 
-    const outcome = classifyImageMessage({ text: caption, hasImage: true }, matcher);
+    const outcome = classifyImageMessage({ text: subject, hasImage: true }, matcher);
     if (outcome.action !== 'log') return;
     const id = `tg:sub:${first.chatId}:${first.messageId}`;
     if (this.deps.writer.has(id)) return; // delivered twice
@@ -283,7 +286,14 @@ export class TelegramService {
     if (!this.record(first.chatId, id, row)) return await this.say(first.chatId, config.telegram.replies.error, replyTo);
 
     // A caption that names no quest (one word of a two-word name) is still saved for a person to look at, but quietly.
-    if (inGroup && outcome.reaction !== 'success') return;
+    if (inGroup && outcome.reaction !== 'success') {
+      // A photo that names a quest but not its hashtag is a clear attempt: tell the member how to make it count.
+      const named = hashtagsOnly ? matcher.match(caption) : undefined;
+      if (named !== undefined && named.kind !== 'none') {
+        await this.say(first.chatId, config.telegram.replies.useHashtag.replaceAll('{tag}', hashtagFor(named.keyword)), replyTo);
+      }
+      return;
+    }
     const { replies } = config.telegram;
     const text =
       caption.trim() === ''
@@ -382,6 +392,16 @@ export function hasHashtag(text: string, keyword: string): boolean {
     .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('_?');
   return new RegExp(`(^|[^\\p{L}\\p{N}_])#${escaped}(?![\\p{L}\\p{N}_])`, 'iu').test(text);
+}
+
+/** The hashtags of a text, read as words: "#join_event #share" becomes "join event share". */
+export function hashtagText(text: string): string {
+  return (text.match(/#[\p{L}\p{N}_]+/gu) ?? []).map((tag) => tag.slice(1).replaceAll('_', ' ')).join(' ');
+}
+
+/** The hashtag for a quest keyword: "join event" becomes "#join_event". */
+export function hashtagFor(keyword: string): string {
+  return `#${normalizeText(keyword).replaceAll(' ', '_')}`;
 }
 
 function channelNameOf(message: TgMessage): string {

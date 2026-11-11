@@ -63,6 +63,8 @@ const TelegramSchema = z.strictObject({
   ignore_admins: z.boolean().default(true),
   /** Quest types that are done with a text message and no photo (for example a question posted in the group). */
   text_quest_types: z.array(questType).default([]),
+  /** In the group a quest counts only when its caption carries the quest hashtag (#daily_check_in). */
+  require_hashtag: z.boolean().default(false),
   replies: z
     .strictObject({
       /** {quest} is replaced with the quest's name. */
@@ -73,6 +75,8 @@ const TelegramSchema = z.strictObject({
       no_caption: replyText.default('Saved. Next time, add the quest name as the caption.'),
       no_image: replyText.default('Please attach a screenshot with your submission.'),
       /** Sent in a private chat when there is no review channel: submissions are taken in the group. */
+      /** Sent in the group to a photo that names a quest without its hashtag. {tag} becomes the hashtag. */
+      use_hashtag: replyText.default("Please add the quest hashtag so it counts, for example {tag}."),
       use_group: replyText.default('Please post your screenshot in the community group, with the quest name as the caption.'),
       ugc_logged: replyText.default('Logged your link. Thank you!'),
       error: replyText.default('Something went wrong on our side. Please try again in a minute.'),
@@ -165,6 +169,7 @@ export interface AppConfig {
     linkQuestType: string;
     ignoreAdmins: boolean;
     textQuestTypes: string[];
+    requireHashtag: boolean;
     replies: {
       /** {quest} stands for the quest's name. */
       logged: string;
@@ -172,6 +177,7 @@ export interface AppConfig {
       noCaption: string;
       noImage: string;
       useGroup: string;
+      useHashtag: string;
       ugcLogged: string;
       error: string;
     };
@@ -338,12 +344,14 @@ function toAppConfig(raw: RawConfig): AppConfig {
       linkQuestType: raw.telegram.link_quest_type,
       ignoreAdmins: raw.telegram.ignore_admins,
       textQuestTypes: raw.telegram.text_quest_types,
+      requireHashtag: raw.telegram.require_hashtag,
       replies: {
         logged: raw.telegram.replies.logged,
         unmatched: raw.telegram.replies.unmatched,
         noCaption: raw.telegram.replies.no_caption,
         noImage: raw.telegram.replies.no_image,
         useGroup: raw.telegram.replies.use_group,
+        useHashtag: raw.telegram.replies.use_hashtag,
         ugcLogged: raw.telegram.replies.ugc_logged,
         error: raw.telegram.replies.error,
       },
